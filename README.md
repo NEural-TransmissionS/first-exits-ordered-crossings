@@ -33,11 +33,23 @@ To reproduce the candidate figures in both vector PDF and PNG formats:
 python numerics/examples.py --figures
 ```
 
-The figures are written to `figures/` by default. They show:
+The figures are written to `figures/` by default. They use exact curves and
+Monte Carlo points across ranges of model parameters, following the numerical
+design of the 2022 paper. They show:
 
-1. exact and simulated probabilities for all 13 weak crossing orders;
-2. the dependence of the two continuous-example functionals on dimension;
-3. Monte Carlo discrepancies for the condition-monitoring moments, measured in standard errors.
+1. how the number of distinct crossing epochs changes with a common threshold,
+   and how delaying one coordinate changes its probability of crossing first;
+2. the dependence of two continuous-example functionals on dimension from
+   $d=2$ through $d=50$;
+3. how the exit index, exit time, and signed passive cost change as the active
+   thresholds vary in the condition-monitoring example.
+
+Each plotted Monte Carlo point uses 10,000 paths by default. Change this
+independently of the numerical tables with, for example,
+
+```bash
+python numerics/examples.py --figures --sweep-paths 50000
+```
 
 For a faster check, reduce the number of paths:
 

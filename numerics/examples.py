@@ -189,7 +189,11 @@ def exact_order_probability(
     return inverse_d_at(result, threshold)
 
 
-def simulate_simple(paths: int, rng: np.random.Generator) -> dict[str, tuple[float, float]]:
+def simulate_simple(
+    paths: int,
+    rng: np.random.Generator,
+    threshold: Index = (1, 1, 1),
+) -> dict[str, tuple[float, float]]:
     """Estimate each of the 13 weak-order probabilities by simulation."""
     increments = np.asarray(list(SIMPLE_SUPPORT), dtype=np.int16)
     probabilities = np.asarray([float(SIMPLE_SUPPORT[key]) for key in SIMPLE_SUPPORT])
@@ -202,8 +206,9 @@ def simulate_simple(paths: int, rng: np.random.Generator) -> dict[str, tuple[flo
         position[unfinished] += increments[
             rng.choice(len(increments), size=len(unfinished), p=probabilities)
         ]
-        # Strict crossing at threshold 1 means that equality is not yet exit.
-        newly_crossed = (crossing[unfinished] < 0) & (position[unfinished] > 1)
+        # Crossing is strict, so equality with a threshold is not yet exit.
+        newly_crossed = ((crossing[unfinished] < 0)
+                         & (position[unfinished] > np.asarray(threshold)))
         row, column = np.nonzero(newly_crossed)
         crossing[unfinished[row], column] = step
 
@@ -393,15 +398,18 @@ def reliability_increment_polynomials() -> tuple[Poly, Poly, Poly, F, F]:
     return probability, time_weighted, cost_weighted, mean_time, mean_cost
 
 
-def exact_reliability_moments() -> dict[str, F]:
+def exact_reliability_moments(
+    threshold: Index = RELIABILITY_THRESHOLD,
+) -> dict[str, F]:
     """Extract all reported condition-monitoring moments from Theorem 8.
 
     Each entry of ``specifications`` supplies derivatives of the delayed law,
     ordinary law, terminal factor, and immediate-exit term, followed by the
     derivative with respect to the exit-index variable.  The product rule and
-    resolvent derivative are then applied before inversion at M=(3,3,3).
+    resolvent derivative are then applied before inversion at the requested
+    threshold vector.
     """
-    degree = RELIABILITY_THRESHOLD
+    degree = threshold
     zero = (0, 0, 0)
     one: Poly = {zero: F(1)}
     g, g_time, g_cost, mean_time, mean_cost = reliability_increment_polynomials()
@@ -503,7 +511,9 @@ def exact_reliability_moments() -> dict[str, F]:
 
 
 def simulate_reliability(
-    paths: int, rng: np.random.Generator
+    paths: int,
+    rng: np.random.Generator,
+    threshold: Index = RELIABILITY_THRESHOLD,
 ) -> dict[str, tuple[float, float]]:
     """Simulate the condition-monitoring process through its first exit."""
     regime_probability = np.asarray([float(row[1]) for row in REGIMES])
@@ -543,7 +553,7 @@ def simulate_reliability(
         signed_cost[indices] += cost_increment
         time[indices] += duration[regime]
 
-        crossed = np.any(position[indices] > np.asarray(RELIABILITY_THRESHOLD), axis=1)
+        crossed = np.any(position[indices] > np.asarray(threshold), axis=1)
         completed = indices[crossed]
         exit_cost[completed] = signed_cost[completed]
         exit_time[completed] = time[completed]
@@ -582,101 +592,171 @@ RELIABILITY_NAMES = (
 
 
 def save_figures(
-    simple_exact: dict[str, float],
-    simple_simulation: dict[str, tuple[float, float]],
-    continuous_rows: list[tuple[int, float, float, float, float, float, float]],
-    reliability_exact: dict[str, F],
-    reliability_simulation: dict[str, tuple[float, float]],
     output_directory: Path,
+    simulation_paths: int,
+    seed: int,
 ) -> None:
-    """Save three figures comparing transform inversions with simulation.
+    """Generate parameter-sweep curves with Monte Carlo dots.
 
-    Error bars are 95% Monte Carlo intervals (estimate plus or minus 1.96
-    standard errors).  The third plot divides every discrepancy by its own
-    standard error so quantities measured in different units can be compared
-    on one meaningful scale.
+    This follows the numerical design of the 2022 paper: formulas are evaluated
+    over a range of model parameters, while simulation is used at a modest
+    number of points to confirm the predicted curves.
     """
-    # Matplotlib is imported only when figures are requested.  The exact
-    # calculations can therefore still be used in a minimal numerical setup.
     import matplotlib.pyplot as plt
 
     output_directory.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({"font.size": 10, "axes.spines.top": False,
                          "axes.spines.right": False})
+    colors = ("#4C78A8", "#E45756", "#54A24B")
 
     def write_figure(figure: object, stem: str) -> None:
-        """Write a vector PDF for LaTeX and a PNG for quick inspection."""
         figure.savefig(output_directory / f"{stem}.pdf", bbox_inches="tight")
         figure.savefig(output_directory / f"{stem}.png", dpi=220,
                        bbox_inches="tight")
         plt.close(figure)
 
-    # Figure 1: the 13 events form a partition, but their probabilities differ
-    # appreciably.  This plot exposes that structure and checks each event.
-    labels = list(simple_exact)
-    horizontal = np.arange(len(labels))
-    exact = np.asarray([simple_exact[label] for label in labels])
-    simulated = np.asarray([simple_simulation[label][0] for label in labels])
-    errors = np.asarray([simple_simulation[label][1] for label in labels])
-    figure, axis = plt.subplots(figsize=(8.2, 4.4))
-    axis.bar(horizontal, exact, color="#4C78A8", alpha=0.72, label="Exact")
-    axis.errorbar(horizontal, simulated, yerr=1.96 * errors, fmt="o",
-                  color="black", capsize=2.5, label="Monte Carlo (95% interval)")
-    axis.set_xticks(horizontal, labels, rotation=45, ha="right")
-    axis.set_ylabel("Probability")
-    axis.set_xlabel("Weak ordering of crossing indices")
-    axis.legend(frameon=False)
-    figure.tight_layout()
-    write_figure(figure, "weak_order_probabilities")
+    partitions = ordered_partitions(3)
 
-    # Figure 2: this is the scientifically useful dimension-scaling picture.
-    dimensions = np.asarray([row[0] for row in continuous_rows])
-    figure, axes = plt.subplots(1, 2, figsize=(8.2, 3.5))
-    for axis, exact_index, estimate_index, error_index, ylabel in (
-        (axes[0], 1, 2, 3, r"$\mathbb{E}[\rho]$"),
-        (axes[1], 4, 5, 6, r"$\mathbb{E}[\xi^\rho]$"),
+    def exact_order_groups(threshold: Index, grouping: str) -> np.ndarray:
+        """Aggregate the 13 exact weak-order probabilities into three groups."""
+        totals = np.zeros(3)
+        for partition in partitions:
+            probability = float(exact_order_probability(partition, threshold))
+            if grouping == "epochs":
+                group = len(partition) - 1
+            elif partition[0] == (0,):
+                group = 0                 # coordinate 1 crosses strictly first
+            elif 0 in partition[0]:
+                group = 1                 # coordinate 1 ties for first
+            else:
+                group = 2                 # another coordinate crosses first
+            totals[group] += probability
+        return totals
+
+    def simulated_order_groups(threshold: Index, grouping: str,
+                               local_seed: int) -> np.ndarray:
+        estimates = simulate_simple(
+            simulation_paths, np.random.default_rng(local_seed), threshold
+        )
+        totals = np.zeros(3)
+        for partition in partitions:
+            if grouping == "epochs":
+                group = len(partition) - 1
+            elif partition[0] == (0,):
+                group = 0
+            elif 0 in partition[0]:
+                group = 1
+            else:
+                group = 2
+            totals[group] += estimates[ordering_label(partition)][0]
+        return totals
+
+    # Weak-order sweep, panel (a): as a common threshold increases, crossings
+    # are spread across more epochs.  Panel (b): delaying only coordinate 1
+    # shifts mass from "coordinate 1 first" to "another coordinate first."
+    common_thresholds = np.arange(1, 11)
+    common_exact = np.vstack([
+        exact_order_groups((m, m, m), "epochs") for m in common_thresholds
+    ])
+    common_simulated = np.vstack([
+        simulated_order_groups((m, m, m), "epochs", seed + 100 + m)
+        for m in common_thresholds
+    ])
+    first_thresholds = np.arange(1, 13)
+    first_exact = np.vstack([
+        exact_order_groups((m, 6, 6), "rank") for m in first_thresholds
+    ])
+    first_simulated = np.vstack([
+        simulated_order_groups((m, 6, 6), "rank", seed + 200 + m)
+        for m in first_thresholds
+    ])
+    figure, axes = plt.subplots(1, 2, figsize=(9.0, 3.7))
+    for group, label in enumerate(("one epoch", "two epochs", "three epochs")):
+        axes[0].plot(common_thresholds, common_exact[:, group], color=colors[group],
+                     label=label)
+        axes[0].scatter(common_thresholds, common_simulated[:, group],
+                        color=colors[group], s=18, zorder=3)
+    for group, label in enumerate(("coordinate 1 first", "ties for first",
+                                   "another coordinate first")):
+        axes[1].plot(first_thresholds, first_exact[:, group], color=colors[group],
+                     label=label)
+        axes[1].scatter(first_thresholds, first_simulated[:, group],
+                        color=colors[group], s=18, zorder=3)
+    axes[0].set(xlabel="Common threshold $m$", ylabel="Probability")
+    axes[1].set(xlabel="$M_1$ with $M_2=M_3=6$", ylabel="Probability")
+    axes[0].legend(frameon=False)
+    axes[1].legend(frameon=False)
+    figure.tight_layout()
+    write_figure(figure, "weak_order_threshold_sweeps")
+
+    # Evaluate the continuous formula at every dimension; simulation dots at a
+    # smaller subset are enough to show agreement without obscuring the trend.
+    dimensions = np.arange(2, 51)
+    continuous_exact = np.asarray([exact_continuous_exit(int(d)) for d in dimensions])
+    simulated_dimensions = np.asarray((2, 3, 5, 10, 20, 35, 50))
+    continuous_simulated = []
+    for d in simulated_dimensions:
+        result = simulate_continuous_exit(
+            simulation_paths, int(d), np.random.default_rng(seed + 300 + int(d))
+        )
+        continuous_simulated.append((result["rho"][0], result["pgf"][0]))
+    continuous_simulated = np.asarray(continuous_simulated)
+    figure, axes = plt.subplots(1, 2, figsize=(8.5, 3.5))
+    for axis, column, ylabel in (
+        (axes[0], 0, r"$\mathbb{E}[\rho]$"),
+        (axes[1], 1, r"$\mathbb{E}[\xi^\rho]$"),
     ):
-        exact_values = np.asarray([row[exact_index] for row in continuous_rows])
-        estimates = np.asarray([row[estimate_index] for row in continuous_rows])
-        errors = np.asarray([row[error_index] for row in continuous_rows])
-        axis.plot(dimensions, exact_values, "-o", color="#4C78A8", label="Exact")
-        axis.errorbar(dimensions, estimates, yerr=1.96 * errors, fmt="s",
-                      color="black", capsize=3, label="Monte Carlo")
-        axis.set_xlabel("Dimension $d$")
-        axis.set_ylabel(ylabel)
-        axis.set_xticks(dimensions)
+        axis.plot(dimensions, continuous_exact[:, column], color=colors[0],
+                  label="Exact")
+        axis.scatter(simulated_dimensions, continuous_simulated[:, column],
+                     color="black", s=22, zorder=3, label="Monte Carlo")
+        axis.set(xlabel="Dimension $d$", ylabel=ylabel)
     axes[0].legend(frameon=False)
     figure.tight_layout()
-    write_figure(figure, "continuous_dimension_scaling")
+    write_figure(figure, "continuous_dimension_sweep")
 
-    # Figure 3: standardized discrepancies are comparable despite the moments
-    # having different units and magnitudes.
-    display_names = {
-        "rho": r"$\rho$", "tau_minus": r"$\tau_{\rho-1}$",
-        "tau_plus": r"$\tau_\rho$", "cost_minus": r"$P_{\rho-1}$",
-        "cost_plus": r"$P_\rho$",
-    }
-    for side, subscript in (("minus", r"\rho-1"), ("plus", r"\rho")):
-        for coordinate in range(1, 4):
-            display_names[f"active_{side}_{coordinate}"] = (
-                rf"$A_{coordinate}({subscript})$"
-            )
-    standardized = []
-    for name in RELIABILITY_NAMES:
-        estimate, standard_error = reliability_simulation[name]
-        standardized.append((estimate - float(reliability_exact[name])) / standard_error)
-    vertical = np.arange(len(RELIABILITY_NAMES))
-    figure, axis = plt.subplots(figsize=(7.2, 4.6))
-    axis.axvspan(-1.96, 1.96, color="#4C78A8", alpha=0.13,
-                 label=r"$\pm1.96$ standard errors")
-    axis.axvline(0.0, color="black", linewidth=0.8)
-    axis.plot(standardized, vertical, "o", color="#E45756")
-    axis.set_yticks(vertical, [display_names[name] for name in RELIABILITY_NAMES])
-    axis.invert_yaxis()
-    axis.set_xlabel("(Monte Carlo estimate - exact value) / standard error")
-    axis.legend(frameon=False, loc="lower right")
+    # The full-functional sweep varies all active thresholds together.  It
+    # displays an exit-index moment, an observation-time moment, and the signed
+    # passive cost, hence exercising distinct pieces of the master transform.
+    reliability_thresholds = np.arange(1, 9)
+    reliability_exact = []
+    reliability_simulated = []
+    for m in reliability_thresholds:
+        threshold = (int(m), int(m), int(m))
+        exact = exact_reliability_moments(threshold)
+        simulated = simulate_reliability(
+            simulation_paths, np.random.default_rng(seed + 400 + int(m)), threshold
+        )
+        reliability_exact.append(tuple(float(exact[name])
+                                       for name in ("rho", "tau_plus", "cost_plus")))
+        reliability_simulated.append(tuple(simulated[name][0]
+                                           for name in ("rho", "tau_plus", "cost_plus")))
+    reliability_exact = np.asarray(reliability_exact)
+    reliability_simulated = np.asarray(reliability_simulated)
+    figure, axes = plt.subplots(1, 3, figsize=(10.2, 3.3))
+    for axis, column, ylabel in (
+        (axes[0], 0, r"$\mathbb{E}[\rho]$"),
+        (axes[1], 1, r"$\mathbb{E}[\tau_\rho]$"),
+        (axes[2], 2, r"$\mathbb{E}[P(\rho)]$"),
+    ):
+        axis.plot(reliability_thresholds, reliability_exact[:, column],
+                  color=colors[0], label="Exact")
+        axis.scatter(reliability_thresholds, reliability_simulated[:, column],
+                     color="black", s=20, zorder=3, label="Monte Carlo")
+        axis.set(xlabel="Common threshold $m$", ylabel=ylabel)
+    axes[0].legend(frameon=False)
     figure.tight_layout()
-    write_figure(figure, "reliability_standardized_errors")
+    write_figure(figure, "reliability_threshold_sweep")
+
+    print("\nPARAMETER-SWEEP ENDPOINTS")
+    print("weak-order epochs at m=1:", common_exact[0])
+    print("weak-order epochs at m=10:", common_exact[-1])
+    print("coordinate-1 rank at M1=1:", first_exact[0])
+    print("coordinate-1 rank at M1=12:", first_exact[-1])
+    print("continuous d=2:", continuous_exact[0])
+    print("continuous d=50:", continuous_exact[-1])
+    print("reliability m=1:", reliability_exact[0])
+    print("reliability m=8:", reliability_exact[-1])
 
 
 def main() -> None:
@@ -688,9 +768,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20_260_924,
                         help="base random seed")
     parser.add_argument("--figures", action="store_true",
-                        help="save PDF and PNG validation figures")
+                        help="save PDF and PNG parameter-sweep figures")
     parser.add_argument("--figure-dir", type=Path, default=Path("figures"),
                         help="figure output directory (default: figures)")
+    parser.add_argument("--sweep-paths", type=int, default=10_000,
+                        help="Monte Carlo paths per point in parameter sweeps "
+                             "(default: 10000)")
     args = parser.parse_args()
     print("FINITE-SUPPORT WEAK-ORDER EXAMPLE")
     simple_simulation = simulate_simple(args.paths, np.random.default_rng(args.seed))
@@ -742,14 +825,7 @@ def main() -> None:
         )
 
     if args.figures:
-        save_figures(
-            simple_exact,
-            simple_simulation,
-            continuous_rows,
-            reliability_exact,
-            reliability_simulation,
-            args.figure_dir,
-        )
+        save_figures(args.figure_dir, args.sweep_paths, args.seed)
         print(f"\nFigures written to {args.figure_dir.resolve()}")
 
 
