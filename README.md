@@ -41,8 +41,8 @@ Monte Carlo points check the condition-monitoring example. They show:
    over $(M_1,M_2)$ when $M_3=6$;
 2. how the mean exit index and probability of exit by the second observation
    vary jointly with dimension $d$ and common threshold $M$;
-3. how the exit index, terminal-interval duration and signed cost, and active
-   positions change as the thresholds vary in the condition-monitoring example.
+3. system survival, competing causes of exit, terminal-regime selection, and
+   passive-cost risk in the condition-monitoring example.
 
 Each plotted Monte Carlo point uses 10,000 paths by default. Change this
 independently of the numerical tables with, for example,

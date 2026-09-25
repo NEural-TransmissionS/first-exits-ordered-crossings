@@ -526,12 +526,70 @@ def exact_reliability_moments(
     return moments
 
 
-def simulate_reliability(
+def exact_reliability_profile(
+    threshold: Index,
+    tolerance: float = 1e-13,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return survival, cause-of-exit, and terminal-regime probabilities.
+
+    The finite-state recursion retains every sub-threshold active position.
+    Absorbing transitions are classified by the coordinates crossing on that
+    transition and by the shared operating regime that generated it.
+    """
+    regime_laws = []
+    for _, regime_probability, _, damage_probability, _ in REGIMES:
+        increments = []
+        for increment in itertools.product((0, 1), repeat=3):
+            conditional_mass = F(1)
+            for k in range(3):
+                conditional_mass *= (
+                    damage_probability[k]
+                    if increment[k]
+                    else F(1) - damage_probability[k]
+                )
+            increments.append((increment, float(conditional_mass)))
+        regime_laws.append((float(regime_probability), increments))
+
+    states: dict[Index, float] = {(1, 0, 1): 1.0}
+    survival = [1.0]
+    causes = np.zeros(4)       # coordinates 1, 2, 3 alone; then a tie
+    terminal_regimes = np.zeros(3)
+    for _ in range(10_000):
+        next_states: dict[Index, float] = {}
+        for position, state_mass in states.items():
+            for regime_index, (regime_mass, increments) in enumerate(regime_laws):
+                for increment, conditional_mass in increments:
+                    mass = state_mass * regime_mass * conditional_mass
+                    new_position = tuple(
+                        position[k] + increment[k] for k in range(3)
+                    )
+                    crossed = tuple(
+                        k for k in range(3) if new_position[k] > threshold[k]
+                    )
+                    if crossed:
+                        cause = crossed[0] if len(crossed) == 1 else 3
+                        causes[cause] += mass
+                        terminal_regimes[regime_index] += mass
+                    else:
+                        next_states[new_position] = (
+                            next_states.get(new_position, 0.0) + mass
+                        )
+        states = next_states
+        remaining = sum(states.values())
+        survival.append(remaining)
+        if remaining < tolerance:
+            break
+    else:
+        raise RuntimeError("reliability survival recursion did not converge")
+    return np.asarray(survival), causes, terminal_regimes
+
+
+def simulate_reliability_samples(
     paths: int,
     rng: np.random.Generator,
     threshold: Index = RELIABILITY_THRESHOLD,
-) -> dict[str, tuple[float, float]]:
-    """Simulate the condition-monitoring process through its first exit."""
+) -> dict[str, np.ndarray]:
+    """Simulate paths and retain the exit elements needed for diagnostics."""
     regime_probability = np.asarray([float(row[1]) for row in REGIMES])
     duration = np.asarray([float(row[2]) for row in REGIMES])
     damage_probability = np.asarray(
@@ -550,6 +608,7 @@ def simulate_reliability(
     exit_time = np.empty(paths)
     pre_position = np.empty((paths, 3), dtype=np.int16)
     exit_position = np.empty((paths, 3), dtype=np.int16)
+    exit_regime = np.empty(paths, dtype=np.int8)
     active = np.ones(paths, dtype=bool)
 
     while np.any(active):
@@ -574,6 +633,7 @@ def simulate_reliability(
         exit_cost[completed] = signed_cost[completed]
         exit_time[completed] = time[completed]
         exit_position[completed] = position[completed]
+        exit_regime[completed] = regime[crossed]
         active[completed] = False
 
     samples = {
@@ -582,13 +642,25 @@ def simulate_reliability(
         "tau_plus": exit_time,
         "cost_minus": pre_cost,
         "cost_plus": exit_cost,
+        "exit_regime": exit_regime,
     }
     for k in range(3):
         samples[f"active_minus_{k + 1}"] = pre_position[:, k].astype(float)
         samples[f"active_plus_{k + 1}"] = exit_position[:, k].astype(float)
+    return samples
+
+
+def simulate_reliability(
+    paths: int,
+    rng: np.random.Generator,
+    threshold: Index = RELIABILITY_THRESHOLD,
+) -> dict[str, tuple[float, float]]:
+    """Return Monte Carlo means and standard errors of the exit elements."""
+    samples = simulate_reliability_samples(paths, rng, threshold)
     return {
         name: (float(values.mean()), float(values.std(ddof=1) / math.sqrt(paths)))
         for name, values in samples.items()
+        if name != "exit_regime"
     }
 
 
@@ -719,72 +791,134 @@ def save_figures(
     figure.tight_layout(rect=(0, 0, 1, 0.95))
     write_figure(figure, "continuous_exit_landscape")
 
-    # The full-functional sweep varies all active thresholds together.  The
-    # pre-/post-exit differences isolate the terminal interval and reveal its
-    # selection bias; terminal active positions show which coordinates tend to
-    # be closest to their thresholds when the first exit occurs.
+    # Standard reliability diagnostics.  Exact finite-state recursions supply
+    # survival, competing-risk, and terminal-regime probabilities.  Simulation
+    # points check those curves and supply the passive-cost quantiles.
     reliability_thresholds = np.arange(1, 9)
-    reliability_exact = []
-    reliability_simulated = []
-    for m in reliability_thresholds:
-        threshold = (int(m), int(m), int(m))
-        exact = exact_reliability_moments(threshold)
-        simulated = simulate_reliability(
-            simulation_paths, np.random.default_rng(seed + 400 + int(m)), threshold
+    reliability_profiles = []
+    reliability_samples = []
+    for threshold_value in reliability_thresholds:
+        threshold = (int(threshold_value),) * 3
+        reliability_profiles.append(exact_reliability_profile(threshold))
+        reliability_samples.append(simulate_reliability_samples(
+            simulation_paths,
+            np.random.default_rng(seed + 400 + int(threshold_value)),
+            threshold,
+        ))
+
+    cause_exact = np.vstack([profile[1] for profile in reliability_profiles])
+    regime_exact = np.vstack([profile[2] for profile in reliability_profiles])
+    cause_simulated = np.zeros_like(cause_exact)
+    regime_simulated = np.zeros_like(regime_exact)
+    cost_quantiles = np.empty((len(reliability_thresholds), 5))
+    for row, (threshold_value, samples) in enumerate(zip(
+        reliability_thresholds, reliability_samples
+    )):
+        crossed = np.column_stack([
+            samples[f"active_plus_{k}"] > threshold_value for k in range(1, 4)
+        ])
+        crossing_count = crossed.sum(axis=1)
+        for coordinate in range(3):
+            cause_simulated[row, coordinate] = np.mean(
+                crossed[:, coordinate] & (crossing_count == 1)
+            )
+        cause_simulated[row, 3] = np.mean(crossing_count > 1)
+        regime_simulated[row] = np.bincount(
+            samples["exit_regime"], minlength=3
+        ) / simulation_paths
+        cost_quantiles[row] = np.quantile(
+            samples["cost_plus"], (0.05, 0.25, 0.50, 0.75, 0.95)
         )
-        reliability_exact.append((
-            float(exact["rho"]),
-            float(exact["tau_plus"] - exact["tau_minus"]),
-            float(exact["cost_plus"] - exact["cost_minus"]),
-            *(float(exact[f"active_plus_{k}"]) for k in range(1, 4)),
-        ))
-        reliability_simulated.append((
-            simulated["rho"][0],
-            simulated["tau_plus"][0] - simulated["tau_minus"][0],
-            simulated["cost_plus"][0] - simulated["cost_minus"][0],
-            *(simulated[f"active_plus_{k}"][0] for k in range(1, 4)),
-        ))
-    reliability_exact = np.asarray(reliability_exact)
-    reliability_simulated = np.asarray(reliability_simulated)
-    _, _, _, unconditional_time, unconditional_cost = (
-        reliability_increment_polynomials()
-    )
+
     figure, axes = plt.subplots(2, 2, figsize=(8.7, 6.5))
-    for axis, column, ylabel in (
-        (axes[0, 0], 0, r"$\mathbb{E}[\rho]$"),
-        (axes[0, 1], 1, r"$\mathbb{E}[\tau_\rho-\tau_{\rho-1}]$"),
-        (axes[1, 0], 2, r"$\mathbb{E}[P_\rho-P_{\rho-1}]$"),
-    ):
-        axis.plot(reliability_thresholds, reliability_exact[:, column],
-                  color=colors[0], label="Exact")
-        axis.scatter(reliability_thresholds, reliability_simulated[:, column],
-                     color="black", s=20, zorder=3, label="Monte Carlo")
-        axis.set(xlabel="Common threshold $M$", ylabel=ylabel)
-    axes[0, 1].axhline(float(unconditional_time), color="#777777",
-                       linestyle="--", label="Ordinary interval mean")
-    axes[1, 0].axhline(float(unconditional_cost), color="#777777",
-                       linestyle="--", label="Ordinary interval mean")
-    for coordinate in range(3):
-        axes[1, 1].plot(
-            reliability_thresholds, reliability_exact[:, 3 + coordinate],
-            color=colors[coordinate], label=rf"coordinate ${coordinate + 1}$",
+    reliability_colors = ("#4C78A8", "#E45756", "#54A24B", "#B279A2")
+
+    # Survival through successive inspection epochs.
+    for threshold_value in (2, 4, 6):
+        row = threshold_value - 1
+        survival = reliability_profiles[row][0]
+        epochs = np.arange(len(survival))
+        axes[0, 0].step(
+            epochs, survival, where="post", color=reliability_colors[row // 2],
+            label=rf"$M={threshold_value}$",
         )
-        axes[1, 1].scatter(
-            reliability_thresholds, reliability_simulated[:, 3 + coordinate],
-            color=colors[coordinate], s=18, zorder=3,
+        marker_epochs = np.arange(0, min(len(survival), 81), 4)
+        simulated_survival = np.asarray([
+            np.mean(reliability_samples[row]["rho"] > epoch)
+            for epoch in marker_epochs
+        ])
+        axes[0, 0].scatter(
+            marker_epochs, simulated_survival,
+            color=reliability_colors[row // 2], s=12, zorder=3,
         )
-    axes[1, 1].plot(reliability_thresholds, reliability_thresholds,
-                    color="#777777", linestyle="--", label="threshold")
-    axes[1, 1].set(
-        xlabel="Common threshold $M$",
-        ylabel=r"$\mathbb{E}[A_i(\rho)]$",
+    axes[0, 0].set(
+        xlabel="Inspection epoch $n$", ylabel=r"$\mathbb{P}(\rho>n)$",
+        title="System survival",
     )
+    axes[0, 0].set_xlim(0, 80)
+    axes[0, 0].set_ylim(-0.02, 1.02)
     axes[0, 0].legend(frameon=False)
-    axes[0, 1].legend(frameon=False)
+
+    # Competing causes: exactly one coordinate triggers, or several tie.
+    cause_labels = ("coordinate 1", "coordinate 2", "coordinate 3", "tie")
+    for column, (label, color) in enumerate(zip(cause_labels, reliability_colors)):
+        axes[0, 1].plot(
+            reliability_thresholds, cause_exact[:, column], color=color, label=label
+        )
+        axes[0, 1].scatter(
+            reliability_thresholds, cause_simulated[:, column],
+            color=color, s=15, zorder=3,
+        )
+    axes[0, 1].set(
+        xlabel="Common threshold $M$", ylabel="Probability",
+        title="Cause of first exit",
+    )
+    axes[0, 1].set_ylim(-0.02, 1.02)
+    axes[0, 1].legend(frameon=False, ncol=2)
+
+    # The regime at exit differs from the prior regime mixture because damaging
+    # regimes are disproportionately represented at a stopping epoch.
+    for column, (regime, color) in enumerate(zip(REGIMES, reliability_colors)):
+        label = regime[0]
+        axes[1, 0].plot(
+            reliability_thresholds, regime_exact[:, column], color=color, label=label
+        )
+        axes[1, 0].scatter(
+            reliability_thresholds, regime_simulated[:, column],
+            color=color, s=15, zorder=3,
+        )
+        axes[1, 0].axhline(
+            float(regime[1]), color=color, linestyle=":", linewidth=1.0
+        )
+    axes[1, 0].set(
+        xlabel="Common threshold $M$", ylabel="Probability",
+        title="Terminal regime (dotted: prior)",
+    )
+    axes[1, 0].set_ylim(-0.02, 1.02)
     axes[1, 0].legend(frameon=False)
-    axes[1, 1].legend(frameon=False, ncol=2)
+
+    # The signed passive component is nonmonotone pathwise, so its distribution
+    # is more revealing than its Wald-governed mean.
+    axes[1, 1].fill_between(
+        reliability_thresholds, cost_quantiles[:, 0], cost_quantiles[:, 4],
+        color=colors[0], alpha=0.16, label="5th--95th percentiles",
+    )
+    axes[1, 1].fill_between(
+        reliability_thresholds, cost_quantiles[:, 1], cost_quantiles[:, 3],
+        color=colors[0], alpha=0.34, label="25th--75th percentiles",
+    )
+    axes[1, 1].plot(
+        reliability_thresholds, cost_quantiles[:, 2], color=colors[0],
+        marker="o", markersize=3, label="median",
+    )
+    axes[1, 1].axhline(0.0, color="#777777", linestyle="--", linewidth=1.0)
+    axes[1, 1].set(
+        xlabel="Common threshold $M$", ylabel=r"Exit cost $P_\rho$",
+        title="Passive-cost risk (Monte Carlo)",
+    )
+    axes[1, 1].legend(frameon=False)
     figure.tight_layout()
-    write_figure(figure, "reliability_threshold_sweep")
+    write_figure(figure, "reliability_diagnostics")
 
     print("\nPARAMETER-SWEEP ENDPOINTS")
     print("weak-order landscape ranges:",
@@ -792,9 +926,10 @@ def save_figures(
     print("continuous E[rho] range:", float(mean_exit.min()), float(mean_exit.max()))
     print("continuous P(rho<=2) range:",
           float(exit_by_two.min()), float(exit_by_two.max()))
-    print("reliability [rho, terminal time, terminal cost, E[A_i(rho)]]")
-    print("  M=1:", reliability_exact[0])
-    print("  M=8:", reliability_exact[-1])
+    print("reliability cause probabilities at M=1:", cause_exact[0])
+    print("reliability cause probabilities at M=8:", cause_exact[-1])
+    print("terminal regime probabilities at M=1:", regime_exact[0])
+    print("terminal regime probabilities at M=8:", regime_exact[-1])
 
 
 def main() -> None:
