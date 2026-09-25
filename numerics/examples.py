@@ -746,7 +746,7 @@ def save_figures(
         r"$\mathbb{P}(|S_1|>1)$",
         r"$\mathbb{P}(\rho_1,\rho_2,\rho_3\ \mathrm{all\ distinct})$",
     )
-    figure, axes = plt.subplots(1, 3, figsize=(11.0, 3.4), sharex=True, sharey=True)
+    figure, axes = plt.subplots(1, 3, figsize=(10.8, 3.4), sharex=True, sharey=True)
     for axis, values, title in zip(axes, order_landscape, order_titles):
         image = axis.imshow(
             values, origin="lower", extent=(0.5, 12.5, 0.5, 12.5),
@@ -759,12 +759,12 @@ def save_figures(
         axis.clabel(contours, inline=True, fontsize=6, fmt="%.2g")
         axis.plot(6, 6, marker="x", color="white", markersize=6,
                   markeredgewidth=1.4)
-        axis.set(title=title, xlabel="$M_1$")
-        figure.colorbar(image, ax=axis, shrink=0.82)
-    axes[0].set_ylabel("$M_2$")
+        axis.set(title=title, xlabel="$M_1$", ylabel="$M_2$")
+        axis.tick_params(axis="y", labelleft=True)
+        figure.colorbar(image, ax=axis, shrink=0.82, fraction=0.045, pad=0.018)
     figure.suptitle("Weak-order landscape with $M_3=6$", y=0.99)
-    figure.subplots_adjust(left=0.06, right=0.98, bottom=0.15,
-                           top=0.82, wspace=0.25)
+    figure.subplots_adjust(left=0.06, right=0.985, bottom=0.15,
+                           top=0.82, wspace=0.12)
     write_figure(figure, "weak_order_threshold_landscape")
 
     # Continuous-model landscape: dimension and threshold are both varied.
