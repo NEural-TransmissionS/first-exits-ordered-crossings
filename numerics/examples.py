@@ -377,9 +377,9 @@ def simulate_continuous_exit(
 # indicators are conditionally independent given the regime but dependent
 # after the regime is averaged out.
 REGIMES = (
-    ("normal", F(55, 100), F(2), (F(10, 100), F(6, 100), F(8, 100)), F(3, 2)),
-    ("strained", F(30, 100), F(3, 2), (F(28, 100), F(22, 100), F(25, 100)), F(9, 10)),
-    ("severe", F(15, 100), F(1), (F(55, 100), F(45, 100), F(50, 100)), F(1, 5)),
+    ("normal", F(55, 100), F(2), (F(10, 100), F(8, 100), F(6, 100)), F(3, 2)),
+    ("strained", F(30, 100), F(3, 2), (F(28, 100), F(25, 100), F(22, 100)), F(9, 10)),
+    ("severe", F(15, 100), F(1), (F(55, 100), F(50, 100), F(45, 100)), F(1, 5)),
 )
 DAMAGE_COST = (F(2), F(3), F(4))
 RELIABILITY_THRESHOLD = (3, 3, 3)
@@ -913,11 +913,12 @@ def save_figures(
     axes[0, 1].set_ylim(-0.02, 0.55)
     axes[0, 1].legend(frameon=False, ncol=2)
 
-    # A single enlarged heat map carries the joint probabilities and their row
-    # conditionals.  Marginal cause probabilities and prior regime weights are
-    # included in the tick labels for context.
+    # A single enlarged heat map carries the joint probabilities and the
+    # regime-conditional cause distributions.  Marginal cause probabilities,
+    # prior regime weights, and terminal regime probabilities are included in
+    # the tick labels for context.
     joint = baseline_profile["joint_cause_regime"]
-    conditional = joint / joint.sum(axis=1, keepdims=True)
+    cause_given_regime = joint / joint.sum(axis=0, keepdims=True)
     light_joint_map = LinearSegmentedColormap.from_list(
         "light_joint", ("#fffaf0", "#fee8b0", "#fdbb84", "#ef8a62")
     )
@@ -928,14 +929,16 @@ def save_figures(
         for column in range(joint.shape[1]):
             axes[1, 0].text(
                 column, row,
-                f"{joint[row, column]:.3f}\n({100 * conditional[row, column]:.0f}%)",
+                f"{joint[row, column]:.3f}\n"
+                f"({100 * cause_given_regime[row, column]:.0f}%)",
                 ha="center", va="center", fontsize=9,
                 color="#202020",
             )
     prior_regime = np.asarray([float(regime[1]) for regime in REGIMES])
+    terminal_regime = baseline_profile["terminal_regimes"]
     axes[1, 0].set_xticks(
         np.arange(3),
-        [f"{regime[0]}\nprior {prior_regime[k]:.2f}"
+        [f"{regime[0]}\nprior {prior_regime[k]:.2f}; exit {terminal_regime[k]:.3f}"
          for k, regime in enumerate(REGIMES)],
     )
     axes[1, 0].set_yticks(
@@ -945,7 +948,7 @@ def save_figures(
     )
     axes[1, 0].set(
         xlabel="Terminal regime", ylabel="Cause of exit",
-        title="Joint probability (row-conditional percentage), $M=3$",
+        title="Joint probability (cause distribution within regime), $M=3$",
     )
     axes[1, 0].set_xticks(np.arange(-0.5, 3, 1), minor=True)
     axes[1, 0].set_yticks(np.arange(-0.5, 4, 1), minor=True)
@@ -1077,10 +1080,10 @@ def save_figures(
         axes[1, 1], joint,
         r"Joint $\mathbb{P}(J=j,R=r)$ ($M=3$)",
     )
-    conditional = joint / joint.sum(axis=1, keepdims=True)
+    conditional = joint / joint.sum(axis=0, keepdims=True)
     annotated_heatmap(
         axes[1, 2], conditional,
-        r"Conditional $\mathbb{P}(R=r\mid J=j)$ ($M=3$)",
+        r"Conditional $\mathbb{P}(J=j\mid R=r,\mathrm{exit})$ ($M=3$)",
         color_map="viridis",
     )
     figure.tight_layout()
