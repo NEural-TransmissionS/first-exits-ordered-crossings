@@ -241,7 +241,11 @@ CONTINUOUS_XI = 0.9
 CONTINUOUS_DIMENSIONS = (2, 3, 5, 10, 25)
 
 
-def continuous_survival(dimension: int, step: int) -> float:
+def continuous_survival(
+    dimension: int,
+    step: int,
+    threshold: float = CONTINUOUS_THRESHOLD,
+) -> float:
     """Return ``P(A_i(step) <= M for every i)``.
 
     Conditional on the accumulated common factor ``c``, the idiosyncratic
@@ -252,7 +256,6 @@ def continuous_survival(dimension: int, step: int) -> float:
         return 1.0
     common_rate = CONTINUOUS_COMMON_RATE
     idiosyncratic_rate = CONTINUOUS_IDIOSYNCRATIC_RATE
-    threshold = CONTINUOUS_THRESHOLD
 
     def integrand(common_sum: float) -> float:
         residual_cdf = gammainc(
@@ -281,7 +284,10 @@ def continuous_survival(dimension: int, step: int) -> float:
     return float(value)
 
 
-def exact_continuous_exit(dimension: int) -> tuple[float, float]:
+def exact_continuous_exit(
+    dimension: int,
+    threshold: float = CONTINUOUS_THRESHOLD,
+) -> tuple[float, float]:
     """Return ``E[rho]`` and ``E[xi^rho]`` from the explicit LC inverse.
 
     With ``S_n=P(rho>n)``, the identities are ``E[rho]=sum_n S_n`` and
@@ -289,7 +295,7 @@ def exact_continuous_exit(dimension: int) -> tuple[float, float]:
     """
     survival = [1.0]
     for step in range(1, 10_000):
-        value = continuous_survival(dimension, step)
+        value = continuous_survival(dimension, step, threshold)
         survival.append(value)
         if step >= 6 and value < 1e-14:
             break
@@ -606,11 +612,11 @@ def save_figures(
     simulation_paths: int,
     seed: int,
 ) -> None:
-    """Generate parameter-sweep curves with Monte Carlo dots.
+    """Generate exact parameter landscapes and a Monte Carlo-checked sweep.
 
-    This follows the numerical design of the 2022 paper: formulas are evaluated
-    over a range of model parameters, while simulation is used at a modest
-    number of points to confirm the predicted curves.
+    The first two figures expose genuinely multivariate structure over two
+    parameter axes.  The final figure follows the numerical design of the 2022
+    paper, with Monte Carlo points checking the exact threshold curves.
     """
     import matplotlib.pyplot as plt
 
@@ -627,106 +633,91 @@ def save_figures(
 
     partitions = ordered_partitions(3)
 
-    def exact_order_groups(threshold: Index, grouping: str) -> np.ndarray:
-        """Aggregate the 13 exact weak-order probabilities into three groups."""
-        totals = np.zeros(3)
+    def exact_order_metrics(threshold: Index) -> np.ndarray:
+        """Summarize the exact weak-order law by three interpretable events."""
+        coordinate_one_first = 0.0
+        tied_first = 0.0
+        all_distinct = 0.0
         for partition in partitions:
             probability = float(exact_order_probability(partition, threshold))
-            if grouping == "epochs":
-                group = len(partition) - 1
-            elif partition[0] == (0,):
-                group = 0                 # coordinate 1 crosses strictly first
-            elif 0 in partition[0]:
-                group = 1                 # coordinate 1 ties for first
-            else:
-                group = 2                 # another coordinate crosses first
-            totals[group] += probability
-        return totals
+            if partition[0] == (0,):
+                coordinate_one_first += probability
+            if len(partition[0]) > 1:
+                tied_first += probability
+            if len(partition) == 3:
+                all_distinct += probability
+        return np.asarray((coordinate_one_first, tied_first, all_distinct))
 
-    def simulated_order_groups(threshold: Index, grouping: str,
-                               local_seed: int) -> np.ndarray:
-        estimates = simulate_simple(
-            simulation_paths, np.random.default_rng(local_seed), threshold
+    # Weak-order landscape over two thresholds, with the third held fixed.
+    # Each cell is an exact aggregation of the 13 canonical weak orderings.
+    order_thresholds = np.arange(1, 13)
+    order_landscape = np.empty((3, len(order_thresholds), len(order_thresholds)))
+    for row, threshold_two in enumerate(order_thresholds):
+        for column, threshold_one in enumerate(order_thresholds):
+            order_landscape[:, row, column] = exact_order_metrics(
+                (int(threshold_one), int(threshold_two), 6)
+            )
+    order_titles = (
+        r"$\mathbb{P}(\rho_1<\min\{\rho_2,\rho_3\})$",
+        r"$\mathbb{P}(|S_1|>1)$",
+        r"$\mathbb{P}(\rho_1,\rho_2,\rho_3\ \mathrm{all\ distinct})$",
+    )
+    figure, axes = plt.subplots(1, 3, figsize=(11.0, 3.4), sharex=True, sharey=True)
+    for axis, values, title in zip(axes, order_landscape, order_titles):
+        image = axis.imshow(
+            values, origin="lower", extent=(0.5, 12.5, 0.5, 12.5),
+            cmap="viridis", aspect="equal",
         )
-        totals = np.zeros(3)
-        for partition in partitions:
-            if grouping == "epochs":
-                group = len(partition) - 1
-            elif partition[0] == (0,):
-                group = 0
-            elif 0 in partition[0]:
-                group = 1
-            else:
-                group = 2
-            totals[group] += estimates[ordering_label(partition)][0]
-        return totals
-
-    # Weak-order sweep, panel (a): as a common threshold increases, crossings
-    # are spread across more epochs.  Panel (b): delaying only coordinate 1
-    # shifts mass from "coordinate 1 first" to "another coordinate first."
-    common_thresholds = np.arange(1, 11)
-    common_exact = np.vstack([
-        exact_order_groups((m, m, m), "epochs") for m in common_thresholds
-    ])
-    common_simulated = np.vstack([
-        simulated_order_groups((m, m, m), "epochs", seed + 100 + m)
-        for m in common_thresholds
-    ])
-    first_thresholds = np.arange(1, 13)
-    first_exact = np.vstack([
-        exact_order_groups((m, 6, 6), "rank") for m in first_thresholds
-    ])
-    first_simulated = np.vstack([
-        simulated_order_groups((m, 6, 6), "rank", seed + 200 + m)
-        for m in first_thresholds
-    ])
-    figure, axes = plt.subplots(1, 2, figsize=(9.0, 3.7))
-    for group, label in enumerate(("one epoch", "two epochs", "three epochs")):
-        axes[0].plot(common_thresholds, common_exact[:, group], color=colors[group],
-                     label=label)
-        axes[0].scatter(common_thresholds, common_simulated[:, group],
-                        color=colors[group], s=18, zorder=3)
-    for group, label in enumerate(("coordinate 1 first", "ties for first",
-                                   "another coordinate first")):
-        axes[1].plot(first_thresholds, first_exact[:, group], color=colors[group],
-                     label=label)
-        axes[1].scatter(first_thresholds, first_simulated[:, group],
-                        color=colors[group], s=18, zorder=3)
-    axes[0].set(xlabel="Common threshold $M$", ylabel="Probability")
-    axes[1].set(xlabel="$M_1$ with $M_2=M_3=6$", ylabel="Probability")
-    axes[0].legend(frameon=False)
-    axes[1].legend(frameon=False)
-    figure.tight_layout()
-    write_figure(figure, "weak_order_threshold_sweeps")
-
-    # Evaluate the continuous formula at every dimension; simulation dots at a
-    # smaller subset are enough to show agreement without obscuring the trend.
-    dimensions = np.arange(2, 51)
-    continuous_exact = np.asarray([
-        (exact_continuous_exit(int(d))[0], 1.0 - continuous_survival(int(d), 2))
-        for d in dimensions
-    ])
-    simulated_dimensions = np.asarray((2, 3, 5, 10, 20, 35, 50))
-    continuous_simulated = []
-    for d in simulated_dimensions:
-        result = simulate_continuous_exit(
-            simulation_paths, int(d), np.random.default_rng(seed + 300 + int(d))
+        contours = axis.contour(
+            order_thresholds, order_thresholds, values, colors="white",
+            linewidths=0.6, alpha=0.8,
         )
-        continuous_simulated.append((result["rho"][0], result["exit_by_two"][0]))
-    continuous_simulated = np.asarray(continuous_simulated)
-    figure, axes = plt.subplots(1, 2, figsize=(8.5, 3.5))
-    for axis, column, ylabel in (
-        (axes[0], 0, r"$\mathbb{E}[\rho]$"),
-        (axes[1], 1, r"$\mathbb{P}(\rho\leq 2)$"),
+        axis.clabel(contours, inline=True, fontsize=6, fmt="%.2g")
+        axis.plot(6, 6, marker="x", color="white", markersize=6,
+                  markeredgewidth=1.4)
+        axis.set(title=title, xlabel="$M_1$")
+        figure.colorbar(image, ax=axis, shrink=0.82)
+    axes[0].set_ylabel("$M_2$")
+    figure.suptitle("Weak-order landscape with $M_3=6$", y=0.99)
+    figure.subplots_adjust(left=0.06, right=0.98, bottom=0.15,
+                           top=0.82, wspace=0.25)
+    write_figure(figure, "weak_order_threshold_landscape")
+
+    # Continuous-model landscape: dimension and threshold are both varied.
+    continuous_dimensions = np.arange(2, 51, 2)
+    continuous_thresholds = np.linspace(1.0, 8.0, 15)
+    mean_exit = np.empty((len(continuous_thresholds), len(continuous_dimensions)))
+    exit_by_two = np.empty_like(mean_exit)
+    for row, threshold in enumerate(continuous_thresholds):
+        for column, dimension in enumerate(continuous_dimensions):
+            mean_exit[row, column] = exact_continuous_exit(
+                int(dimension), float(threshold)
+            )[0]
+            exit_by_two[row, column] = 1.0 - continuous_survival(
+                int(dimension), 2, float(threshold)
+            )
+    dimension_grid, threshold_grid = np.meshgrid(
+        continuous_dimensions, continuous_thresholds
+    )
+    figure, axes = plt.subplots(1, 2, figsize=(9.0, 3.8), sharex=True, sharey=True)
+    for axis, values, title, color_map in (
+        (axes[0], mean_exit, r"$\mathbb{E}[\rho]$", "viridis"),
+        (axes[1], exit_by_two, r"$\mathbb{P}(\rho\leq2)$", "magma"),
     ):
-        axis.plot(dimensions, continuous_exact[:, column], color=colors[0],
-                  label="Exact")
-        axis.scatter(simulated_dimensions, continuous_simulated[:, column],
-                     color="black", s=22, zorder=3, label="Monte Carlo")
-        axis.set(xlabel="Dimension $d$", ylabel=ylabel)
-    axes[0].legend(frameon=False)
-    figure.tight_layout()
-    write_figure(figure, "continuous_dimension_sweep")
+        image = axis.pcolormesh(
+            dimension_grid, threshold_grid, values, shading="auto", cmap=color_map
+        )
+        contours = axis.contour(
+            dimension_grid, threshold_grid, values, colors="white",
+            linewidths=0.6, alpha=0.8,
+        )
+        axis.clabel(contours, inline=True, fontsize=7, fmt="%.2g")
+        axis.set(title=title, xlabel="Dimension $d$")
+        figure.colorbar(image, ax=axis, shrink=0.9)
+    axes[0].set_ylabel("Common threshold $M$")
+    figure.suptitle("Continuous common-factor exit landscape", y=0.99)
+    figure.tight_layout(rect=(0, 0, 1, 0.95))
+    write_figure(figure, "continuous_exit_landscape")
 
     # The full-functional sweep varies all active thresholds together.  The
     # pre-/post-exit differences isolate the terminal interval and reveal its
@@ -796,12 +787,11 @@ def save_figures(
     write_figure(figure, "reliability_threshold_sweep")
 
     print("\nPARAMETER-SWEEP ENDPOINTS")
-    print("weak-order epochs at M=1:", common_exact[0])
-    print("weak-order epochs at M=10:", common_exact[-1])
-    print("coordinate-1 rank at M1=1:", first_exact[0])
-    print("coordinate-1 rank at M1=12:", first_exact[-1])
-    print("continuous d=2:", continuous_exact[0])
-    print("continuous d=50:", continuous_exact[-1])
+    print("weak-order landscape ranges:",
+          [(float(values.min()), float(values.max())) for values in order_landscape])
+    print("continuous E[rho] range:", float(mean_exit.min()), float(mean_exit.max()))
+    print("continuous P(rho<=2) range:",
+          float(exit_by_two.min()), float(exit_by_two.max()))
     print("reliability [rho, terminal time, terminal cost, E[A_i(rho)]]")
     print("  M=1:", reliability_exact[0])
     print("  M=8:", reliability_exact[-1])

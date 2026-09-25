@@ -33,14 +33,14 @@ To reproduce the candidate figures in both vector PDF and PNG formats:
 python numerics/examples.py --figures
 ```
 
-The figures are written to `figures/` by default. They use exact curves and
-Monte Carlo points across ranges of model parameters, following the numerical
-design of the 2022 paper. They show:
+The figures are written to `figures/` by default. Exact heat maps expose the
+two-parameter structure of the first two examples, while exact curves and
+Monte Carlo points check the condition-monitoring example. They show:
 
-1. how the number of distinct crossing epochs changes with a common threshold,
-   and how delaying one coordinate changes its probability of crossing first;
-2. the dependence of the mean exit index and the probability of exit by the
-   second observation on dimension from $d=2$ through $d=50$;
+1. how strict-first, tied-first, and fully distinct crossing probabilities vary
+   over $(M_1,M_2)$ when $M_3=6$;
+2. how the mean exit index and probability of exit by the second observation
+   vary jointly with dimension $d$ and common threshold $M$;
 3. how the exit index, terminal-interval duration and signed cost, and active
    positions change as the thresholds vary in the condition-monitoring example.
 
