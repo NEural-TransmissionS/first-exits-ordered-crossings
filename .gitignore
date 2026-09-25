@@ -38,3 +38,6 @@ arxiv_submission_preview.pdf
 .venv/
 __pycache__/
 *.py[cod]
+
+# Generated numerical figures
+/figures/

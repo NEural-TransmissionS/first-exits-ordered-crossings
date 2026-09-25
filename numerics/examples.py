@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Reproduce the three numerical illustrations in main.tex.
+"""Reproduce the paper's three numerical illustrations.
 
-The exact calculations use truncated multivariate power-series arithmetic with
-Fraction coefficients.  This is precisely the inverse D-operator: after a
-threshold transform is divided by prod_i(1-z_i), the requested fixed-threshold
-value is its z^M coefficient.
+The code is organized to parallel the mathematics.  A polynomial is a
+dictionary: the key ``(m_1, ..., m_d)`` denotes the monomial
+``z_1**m_1 ... z_d**m_d``, and the associated value is its coefficient.  Only
+powers up to the threshold vector ``M`` are retained because the inverse
+D-transform at ``M`` depends on only those finitely many coefficients.
+
+The discrete calculations use exact rational arithmetic.  Floating-point
+arithmetic is used only for quadrature, simulation, and optional figures.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ import argparse
 import itertools
 import math
 from fractions import Fraction as F
+from pathlib import Path
 
 import numpy as np
 from scipy.integrate import quad
@@ -23,7 +28,13 @@ Index = tuple[int, ...]
 Poly = dict[Index, F]
 
 
+# ---------------------------------------------------------------------------
+# Truncated multivariate power-series arithmetic
+# ---------------------------------------------------------------------------
+
+
 def poly_add(a: Poly, b: Poly, scale_a: F = F(1), scale_b: F = F(1)) -> Poly:
+    """Return ``scale_a*a + scale_b*b`` coefficient by coefficient."""
     out: Poly = {}
     for key in set(a) | set(b):
         value = scale_a * a.get(key, F(0)) + scale_b * b.get(key, F(0))
@@ -33,10 +44,12 @@ def poly_add(a: Poly, b: Poly, scale_a: F = F(1), scale_b: F = F(1)) -> Poly:
 
 
 def poly_scale(a: Poly, scalar: F) -> Poly:
+    """Multiply every coefficient by ``scalar``."""
     return {key: scalar * value for key, value in a.items() if scalar * value}
 
 
 def poly_mul(a: Poly, b: Poly, degree: Index) -> Poly:
+    """Multiply two series, discarding powers above the threshold ``degree``."""
     out: Poly = {}
     for left, left_value in a.items():
         for right, right_value in b.items():
@@ -47,7 +60,13 @@ def poly_mul(a: Poly, b: Poly, degree: Index) -> Poly:
 
 
 def poly_inverse_one_minus(q: Poly, degree: Index) -> Poly:
-    """Return the truncated series of 1/(1-q)."""
+    """Return the truncated series of ``1/(1-q)``.
+
+    Its coefficients follow recursively from ``(1-q)K=1``.  Increasing total
+    degree guarantees that every previously needed coefficient of ``K`` is
+    already known.  A constant term of ``q`` is allowed and represents an
+    increment that leaves all selected coordinates unchanged.
+    """
     zero = (0,) * len(degree)
     q_zero = q.get(zero, F(0))
     inverse: Poly = {zero: F(1) / (F(1) - q_zero)}
@@ -68,7 +87,11 @@ def poly_inverse_one_minus(q: Poly, degree: Index) -> Poly:
 
 
 def inverse_d_at(poly: Poly, threshold: Index) -> F:
-    """Coefficient of z^threshold in poly/prod_i(1-z_i)."""
+    """Evaluate the inverse D-transform at ``threshold``.
+
+    The coefficient of ``z^M`` in ``poly/prod_i(1-z_i)`` is the sum of all
+    coefficients of ``poly`` indexed coordinatewise below ``M``.
+    """
     return sum(
         poly.get(index, F(0))
         for index in itertools.product(*(range(bound + 1) for bound in threshold))
@@ -76,6 +99,12 @@ def inverse_d_at(poly: Poly, threshold: Index) -> F:
 
 
 def ordered_partitions(dimension: int) -> list[tuple[tuple[int, ...], ...]]:
+    """Enumerate weak orders as ordered simultaneous-crossing blocks.
+
+    Coordinates in one block cross together; block order gives the strict
+    order between crossing times.  Indices within a block remain increasing,
+    so each weak order has exactly one encoding.
+    """
     partitions: list[tuple[tuple[int, ...], ...]] = []
     for block_count in range(1, dimension + 1):
         for labels in itertools.product(range(block_count), repeat=dimension):
@@ -91,9 +120,16 @@ def ordered_partitions(dimension: int) -> list[tuple[tuple[int, ...], ...]]:
 
 
 def ordering_label(partition: tuple[tuple[int, ...], ...]) -> str:
+    """Convert ``((0, 2), (1,))`` to the human-readable label ``1=3<2``."""
     return "<".join("=".join(str(i + 1) for i in block) for block in partition)
 
 
+# ---------------------------------------------------------------------------
+# Example 1: all weak crossing orders for a dependent d=3 walk
+# ---------------------------------------------------------------------------
+
+# Exact joint law of one Bernoulli-vector increment.  Dependence is visible
+# because the eight masses do not factor into three Bernoulli marginals.
 SIMPLE_SUPPORT: dict[Index, F] = {
     (0, 0, 0): F(10, 100),
     (1, 0, 0): F(12, 100),
@@ -107,6 +143,7 @@ SIMPLE_SUPPORT: dict[Index, F] = {
 
 
 def projected_pgf(support: dict[Index, F], active: set[int]) -> Poly:
+    """Return the PGF obtained by setting coordinates outside ``active`` to 1."""
     dimension = len(next(iter(support)))
     out: Poly = {}
     for increment, probability in support.items():
@@ -118,6 +155,13 @@ def projected_pgf(support: dict[Index, F], active: set[int]) -> Poly:
 def exact_order_probability(
     partition: tuple[tuple[int, ...], ...], threshold: Index
 ) -> F:
+    """Invert the ordered-partition formula at a fixed threshold.
+
+    For a crossing block, ``tail`` is the set of coordinates that have not
+    crossed before that block.  The alternating subset sum is its
+    inclusion--exclusion numerator; ``1/(1-g_tail)`` is the geometric waiting
+    factor.  Their product is exactly the specialization of Theorem 4.
+    """
     dimension = len(threshold)
     result: Poly = {(0,) * dimension: F(1)}
     for block_index, block in enumerate(partition):
@@ -127,6 +171,7 @@ def exact_order_probability(
             if block_index + 1 < len(partition)
             else set()
         )
+        # Inclusion--exclusion over subsets of the simultaneous-crossing block.
         numerator: Poly = {}
         for mask in range(1 << len(block)):
             selected = {block[j] for j in range(len(block)) if (mask >> j) & 1}
@@ -145,6 +190,7 @@ def exact_order_probability(
 
 
 def simulate_simple(paths: int, rng: np.random.Generator) -> dict[str, tuple[float, float]]:
+    """Estimate each of the 13 weak-order probabilities by simulation."""
     increments = np.asarray(list(SIMPLE_SUPPORT), dtype=np.int16)
     probabilities = np.asarray([float(SIMPLE_SUPPORT[key]) for key in SIMPLE_SUPPORT])
     position = np.zeros((paths, 3), dtype=np.int16)
@@ -156,10 +202,12 @@ def simulate_simple(paths: int, rng: np.random.Generator) -> dict[str, tuple[flo
         position[unfinished] += increments[
             rng.choice(len(increments), size=len(unfinished), p=probabilities)
         ]
+        # Strict crossing at threshold 1 means that equality is not yet exit.
         newly_crossed = (crossing[unfinished] < 0) & (position[unfinished] > 1)
         row, column = np.nonzero(newly_crossed)
         crossing[unfinished[row], column] = step
 
+    # Assign each crossing-index vector to its unique ordered partition.
     estimates: dict[str, tuple[float, float]] = {}
     for partition in ordered_partitions(3):
         mask = np.ones(paths, dtype=bool)
@@ -177,6 +225,10 @@ def simulate_simple(paths: int, rng: np.random.Generator) -> dict[str, tuple[flo
     return estimates
 
 
+# ---------------------------------------------------------------------------
+# Example 2: arbitrary-dimensional continuous common-factor model
+# ---------------------------------------------------------------------------
+
 CONTINUOUS_COMMON_RATE = 2.0
 CONTINUOUS_IDIOSYNCRATIC_RATE = 2.0
 CONTINUOUS_THRESHOLD = 4.0
@@ -185,7 +237,12 @@ CONTINUOUS_DIMENSIONS = (2, 3, 5, 10, 25)
 
 
 def continuous_survival(dimension: int, step: int) -> float:
-    """Return P(A_i(step) <= M for every i) in the common-factor model."""
+    """Return ``P(A_i(step) <= M for every i)``.
+
+    Conditional on the accumulated common factor ``c``, the idiosyncratic
+    Gamma sums are independent.  Hence the multivariate inverse reduces to a
+    one-dimensional integral: common-factor density times ``[Gamma CDF]^d``.
+    """
     if step == 0:
         return 1.0
     common_rate = CONTINUOUS_COMMON_RATE
@@ -198,6 +255,7 @@ def continuous_survival(dimension: int, step: int) -> float:
         )
         if common_sum <= 0.0 or residual_cdf <= 0.0:
             return 0.0
+        # The logarithmic form prevents underflow for larger dimensions.
         log_value = (
             step * math.log(common_rate)
             + (step - 1) * math.log(common_sum)
@@ -219,7 +277,11 @@ def continuous_survival(dimension: int, step: int) -> float:
 
 
 def exact_continuous_exit(dimension: int) -> tuple[float, float]:
-    """Return E[rho] and E[xi^rho] from the explicit LC inverse."""
+    """Return ``E[rho]`` and ``E[xi^rho]`` from the explicit LC inverse.
+
+    With ``S_n=P(rho>n)``, the identities are ``E[rho]=sum_n S_n`` and
+    ``P(rho=n+1)=S_n-S_(n+1)``.
+    """
     survival = [1.0]
     for step in range(1, 10_000):
         value = continuous_survival(dimension, step)
@@ -240,7 +302,12 @@ def exact_continuous_exit(dimension: int) -> tuple[float, float]:
 def simulate_continuous_exit(
     paths: int, dimension: int, rng: np.random.Generator, batch_size: int = 50_000
 ) -> dict[str, tuple[float, float]]:
-    """Simulate the arbitrary-dimensional continuous common-factor model."""
+    """Simulate the common-factor model, returning means and standard errors.
+
+    Batching bounds memory use.  At each step, every active path receives one
+    common exponential increment and one independent exponential increment per
+    coordinate.
+    """
     totals = {"rho": 0.0, "rho_sq": 0.0, "pgf": 0.0, "pgf_sq": 0.0}
     completed = 0
     while completed < paths:
@@ -280,6 +347,14 @@ def simulate_continuous_exit(
     return output
 
 
+# ---------------------------------------------------------------------------
+# Example 3: condition monitoring with dependence and a passive signed cost
+# ---------------------------------------------------------------------------
+
+# A row contains (name, probability, duration, damage probabilities, credit
+# rate).  One shared regime is selected per interval.  Thus the three damage
+# indicators are conditionally independent given the regime but dependent
+# after the regime is averaged out.
 REGIMES = (
     ("normal", F(55, 100), F(2), (F(10, 100), F(6, 100), F(8, 100)), F(3, 2)),
     ("strained", F(30, 100), F(3, 2), (F(28, 100), F(22, 100), F(25, 100)), F(9, 10)),
@@ -290,6 +365,12 @@ RELIABILITY_THRESHOLD = (3, 3, 3)
 
 
 def reliability_increment_polynomials() -> tuple[Poly, Poly, Poly, F, F]:
+    """Construct the probability-, time-, and cost-weighted one-step PGFs.
+
+    For example, the coefficient of ``z^x`` in ``time_weighted`` is
+    ``E[sigma * 1_{X=x}]``.  These weighted PGFs are derivatives of the joint
+    transform and therefore give the required moments after inversion.
+    """
     probability: Poly = {}
     time_weighted: Poly = {}
     cost_weighted: Poly = {}
@@ -313,6 +394,13 @@ def reliability_increment_polynomials() -> tuple[Poly, Poly, Poly, F, F]:
 
 
 def exact_reliability_moments() -> dict[str, F]:
+    """Extract all reported condition-monitoring moments from Theorem 8.
+
+    Each entry of ``specifications`` supplies derivatives of the delayed law,
+    ordinary law, terminal factor, and immediate-exit term, followed by the
+    derivative with respect to the exit-index variable.  The product rule and
+    resolvent derivative are then applied before inversion at M=(3,3,3).
+    """
     degree = RELIABILITY_THRESHOLD
     zero = (0, 0, 0)
     one: Poly = {zero: F(1)}
@@ -335,6 +423,7 @@ def exact_reliability_moments() -> dict[str, F]:
         for k in range(3)
     ]
 
+    # Neutral specialization of the exit factor: 1-G(z).
     exit_difference = poly_add(one, g, scale_b=F(-1))
     resolvent = poly_inverse_one_minus(g, degree)
     positive_exit = poly_mul(poly_mul(g0, resolvent, degree), exit_difference, degree)
@@ -383,6 +472,7 @@ def exact_reliability_moments() -> dict[str, F]:
 
     moments = {"normalization": inverse_d_at(transform, degree)}
     for name, (dq0, dq, dl, initial_difference, dxi) in specifications.items():
+        # d(1-G)^(-1)=(1-G)^(-1)(dG)(1-G)^(-1).
         d_resolvent = poly_mul(
             poly_mul(
                 resolvent,
@@ -415,6 +505,7 @@ def exact_reliability_moments() -> dict[str, F]:
 def simulate_reliability(
     paths: int, rng: np.random.Generator
 ) -> dict[str, tuple[float, float]]:
+    """Simulate the condition-monitoring process through its first exit."""
     regime_probability = np.asarray([float(row[1]) for row in REGIMES])
     duration = np.asarray([float(row[2]) for row in REGIMES])
     damage_probability = np.asarray(
@@ -444,6 +535,7 @@ def simulate_reliability(
         ).astype(np.int16)
         cost_increment = increment @ damage_cost - credit_rate[regime] * duration[regime]
 
+        # Save left-limit quantities before applying this interval's increment.
         pre_cost[indices] = signed_cost[indices]
         pre_time[indices] = time[indices]
         pre_position[indices] = position[indices]
@@ -474,27 +566,151 @@ def simulate_reliability(
     }
 
 
+RELIABILITY_NAMES = (
+    "rho",
+    "tau_minus",
+    "active_minus_1",
+    "active_minus_2",
+    "active_minus_3",
+    "cost_minus",
+    "tau_plus",
+    "active_plus_1",
+    "active_plus_2",
+    "active_plus_3",
+    "cost_plus",
+)
+
+
+def save_figures(
+    simple_exact: dict[str, float],
+    simple_simulation: dict[str, tuple[float, float]],
+    continuous_rows: list[tuple[int, float, float, float, float, float, float]],
+    reliability_exact: dict[str, F],
+    reliability_simulation: dict[str, tuple[float, float]],
+    output_directory: Path,
+) -> None:
+    """Save three figures comparing transform inversions with simulation.
+
+    Error bars are 95% Monte Carlo intervals (estimate plus or minus 1.96
+    standard errors).  The third plot divides every discrepancy by its own
+    standard error so quantities measured in different units can be compared
+    on one meaningful scale.
+    """
+    # Matplotlib is imported only when figures are requested.  The exact
+    # calculations can therefore still be used in a minimal numerical setup.
+    import matplotlib.pyplot as plt
+
+    output_directory.mkdir(parents=True, exist_ok=True)
+    plt.rcParams.update({"font.size": 10, "axes.spines.top": False,
+                         "axes.spines.right": False})
+
+    def write_figure(figure: object, stem: str) -> None:
+        """Write a vector PDF for LaTeX and a PNG for quick inspection."""
+        figure.savefig(output_directory / f"{stem}.pdf", bbox_inches="tight")
+        figure.savefig(output_directory / f"{stem}.png", dpi=220,
+                       bbox_inches="tight")
+        plt.close(figure)
+
+    # Figure 1: the 13 events form a partition, but their probabilities differ
+    # appreciably.  This plot exposes that structure and checks each event.
+    labels = list(simple_exact)
+    horizontal = np.arange(len(labels))
+    exact = np.asarray([simple_exact[label] for label in labels])
+    simulated = np.asarray([simple_simulation[label][0] for label in labels])
+    errors = np.asarray([simple_simulation[label][1] for label in labels])
+    figure, axis = plt.subplots(figsize=(8.2, 4.4))
+    axis.bar(horizontal, exact, color="#4C78A8", alpha=0.72, label="Exact")
+    axis.errorbar(horizontal, simulated, yerr=1.96 * errors, fmt="o",
+                  color="black", capsize=2.5, label="Monte Carlo (95% interval)")
+    axis.set_xticks(horizontal, labels, rotation=45, ha="right")
+    axis.set_ylabel("Probability")
+    axis.set_xlabel("Weak ordering of crossing indices")
+    axis.legend(frameon=False)
+    figure.tight_layout()
+    write_figure(figure, "weak_order_probabilities")
+
+    # Figure 2: this is the scientifically useful dimension-scaling picture.
+    dimensions = np.asarray([row[0] for row in continuous_rows])
+    figure, axes = plt.subplots(1, 2, figsize=(8.2, 3.5))
+    for axis, exact_index, estimate_index, error_index, ylabel in (
+        (axes[0], 1, 2, 3, r"$\mathbb{E}[\rho]$"),
+        (axes[1], 4, 5, 6, r"$\mathbb{E}[\xi^\rho]$"),
+    ):
+        exact_values = np.asarray([row[exact_index] for row in continuous_rows])
+        estimates = np.asarray([row[estimate_index] for row in continuous_rows])
+        errors = np.asarray([row[error_index] for row in continuous_rows])
+        axis.plot(dimensions, exact_values, "-o", color="#4C78A8", label="Exact")
+        axis.errorbar(dimensions, estimates, yerr=1.96 * errors, fmt="s",
+                      color="black", capsize=3, label="Monte Carlo")
+        axis.set_xlabel("Dimension $d$")
+        axis.set_ylabel(ylabel)
+        axis.set_xticks(dimensions)
+    axes[0].legend(frameon=False)
+    figure.tight_layout()
+    write_figure(figure, "continuous_dimension_scaling")
+
+    # Figure 3: standardized discrepancies are comparable despite the moments
+    # having different units and magnitudes.
+    display_names = {
+        "rho": r"$\rho$", "tau_minus": r"$\tau_{\rho-1}$",
+        "tau_plus": r"$\tau_\rho$", "cost_minus": r"$P_{\rho-1}$",
+        "cost_plus": r"$P_\rho$",
+    }
+    for side, subscript in (("minus", r"\rho-1"), ("plus", r"\rho")):
+        for coordinate in range(1, 4):
+            display_names[f"active_{side}_{coordinate}"] = (
+                rf"$A_{coordinate}({subscript})$"
+            )
+    standardized = []
+    for name in RELIABILITY_NAMES:
+        estimate, standard_error = reliability_simulation[name]
+        standardized.append((estimate - float(reliability_exact[name])) / standard_error)
+    vertical = np.arange(len(RELIABILITY_NAMES))
+    figure, axis = plt.subplots(figsize=(7.2, 4.6))
+    axis.axvspan(-1.96, 1.96, color="#4C78A8", alpha=0.13,
+                 label=r"$\pm1.96$ standard errors")
+    axis.axvline(0.0, color="black", linewidth=0.8)
+    axis.plot(standardized, vertical, "o", color="#E45756")
+    axis.set_yticks(vertical, [display_names[name] for name in RELIABILITY_NAMES])
+    axis.invert_yaxis()
+    axis.set_xlabel("(Monte Carlo estimate - exact value) / standard error")
+    axis.legend(frameon=False, loc="lower right")
+    figure.tight_layout()
+    write_figure(figure, "reliability_standardized_errors")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--paths", type=int, default=500_000)
-    parser.add_argument("--seed", type=int, default=20_260_924)
+    parser = argparse.ArgumentParser(
+        description="Reproduce the exact calculations and Monte Carlo checks."
+    )
+    parser.add_argument("--paths", type=int, default=500_000,
+                        help="number of Monte Carlo paths (default: 500000)")
+    parser.add_argument("--seed", type=int, default=20_260_924,
+                        help="base random seed")
+    parser.add_argument("--figures", action="store_true",
+                        help="save PDF and PNG validation figures")
+    parser.add_argument("--figure-dir", type=Path, default=Path("figures"),
+                        help="figure output directory (default: figures)")
     args = parser.parse_args()
     print("FINITE-SUPPORT WEAK-ORDER EXAMPLE")
     simple_simulation = simulate_simple(args.paths, np.random.default_rng(args.seed))
-    exact_values: list[F] = []
+    simple_exact: dict[str, float] = {}
+    exact_sum = F(0)
     for partition in ordered_partitions(3):
         label = ordering_label(partition)
         exact = exact_order_probability(partition, (1, 1, 1))
-        exact_values.append(exact)
+        simple_exact[label] = float(exact)
+        exact_sum += exact
         estimate, standard_error = simple_simulation[label]
         print(
             f"{label:9s} exact={float(exact):.8f} "
             f"mc={estimate:.8f} se={standard_error:.8f}"
         )
-    print(f"exact sum={sum(exact_values, F(0))}")
+    print(f"exact sum={exact_sum}")
 
     print("\nARBITRARY-D CONTINUOUS EXAMPLE")
     continuous_rng = np.random.default_rng(args.seed + 1)
+    continuous_rows: list[tuple[int, float, float, float, float, float, float]] = []
     for dimension in CONTINUOUS_DIMENSIONS:
         exact_mean, exact_pgf = exact_continuous_exit(dimension)
         simulation = simulate_continuous_exit(
@@ -502,6 +718,10 @@ def main() -> None:
         )
         mean_estimate, mean_se = simulation["rho"]
         pgf_estimate, pgf_se = simulation["pgf"]
+        continuous_rows.append(
+            (dimension, exact_mean, mean_estimate, mean_se,
+             exact_pgf, pgf_estimate, pgf_se)
+        )
         print(
             f"d={dimension:2d} "
             f"E[rho]={exact_mean:.8f} mc={mean_estimate:.8f} se={mean_se:.8f} "
@@ -514,24 +734,23 @@ def main() -> None:
         args.paths, np.random.default_rng(args.seed)
     )
     print(f"normalization={reliability_exact['normalization']}")
-    for name in (
-        "rho",
-        "tau_minus",
-        "active_minus_1",
-        "active_minus_2",
-        "active_minus_3",
-        "cost_minus",
-        "tau_plus",
-        "active_plus_1",
-        "active_plus_2",
-        "active_plus_3",
-        "cost_plus",
-    ):
+    for name in RELIABILITY_NAMES:
         estimate, standard_error = reliability_simulation[name]
         print(
             f"{name:10s} exact={float(reliability_exact[name]):.8f} "
             f"mc={estimate:.8f} se={standard_error:.8f}"
         )
+
+    if args.figures:
+        save_figures(
+            simple_exact,
+            simple_simulation,
+            continuous_rows,
+            reliability_exact,
+            reliability_simulation,
+            args.figure_dir,
+        )
+        print(f"\nFigures written to {args.figure_dir.resolve()}")
 
 
 if __name__ == "__main__":

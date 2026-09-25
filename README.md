@@ -27,6 +27,18 @@ Run all three examples with the paper's default of 500,000 Monte Carlo paths:
 python numerics/examples.py
 ```
 
+To reproduce the candidate figures in both vector PDF and PNG formats:
+
+```bash
+python numerics/examples.py --figures
+```
+
+The figures are written to `figures/` by default. They show:
+
+1. exact and simulated probabilities for all 13 weak crossing orders;
+2. the dependence of the two continuous-example functionals on dimension;
+3. Monte Carlo discrepancies for the condition-monitoring moments, measured in standard errors.
+
 For a faster check, reduce the number of paths:
 
 ```bash
