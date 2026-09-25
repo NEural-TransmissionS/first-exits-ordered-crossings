@@ -313,7 +313,14 @@ def simulate_continuous_exit(
     common exponential increment and one independent exponential increment per
     coordinate.
     """
-    totals = {"rho": 0.0, "rho_sq": 0.0, "pgf": 0.0, "pgf_sq": 0.0}
+    totals = {
+        "rho": 0.0,
+        "rho_sq": 0.0,
+        "pgf": 0.0,
+        "pgf_sq": 0.0,
+        "exit_by_two": 0.0,
+        "exit_by_two_sq": 0.0,
+    }
     completed = 0
     while completed < paths:
         count = min(batch_size, paths - completed)
@@ -338,14 +345,17 @@ def simulate_continuous_exit(
 
         rho = exit_index.astype(np.float64)
         pgf = CONTINUOUS_XI**rho
+        exit_by_two = (rho <= 2).astype(np.float64)
         totals["rho"] += float(rho.sum())
         totals["rho_sq"] += float(rho @ rho)
         totals["pgf"] += float(pgf.sum())
         totals["pgf_sq"] += float(pgf @ pgf)
+        totals["exit_by_two"] += float(exit_by_two.sum())
+        totals["exit_by_two_sq"] += float(exit_by_two @ exit_by_two)
         completed += count
 
     output: dict[str, tuple[float, float]] = {}
-    for name in ("rho", "pgf"):
+    for name in ("rho", "pgf", "exit_by_two"):
         mean = totals[name] / paths
         variance = (totals[f"{name}_sq"] - paths * mean**2) / (paths - 1)
         output[name] = (mean, math.sqrt(max(variance, 0.0) / paths))
@@ -682,7 +692,7 @@ def save_figures(
                      label=label)
         axes[1].scatter(first_thresholds, first_simulated[:, group],
                         color=colors[group], s=18, zorder=3)
-    axes[0].set(xlabel="Common threshold $m$", ylabel="Probability")
+    axes[0].set(xlabel="Common threshold $M$", ylabel="Probability")
     axes[1].set(xlabel="$M_1$ with $M_2=M_3=6$", ylabel="Probability")
     axes[0].legend(frameon=False)
     axes[1].legend(frameon=False)
@@ -692,19 +702,22 @@ def save_figures(
     # Evaluate the continuous formula at every dimension; simulation dots at a
     # smaller subset are enough to show agreement without obscuring the trend.
     dimensions = np.arange(2, 51)
-    continuous_exact = np.asarray([exact_continuous_exit(int(d)) for d in dimensions])
+    continuous_exact = np.asarray([
+        (exact_continuous_exit(int(d))[0], 1.0 - continuous_survival(int(d), 2))
+        for d in dimensions
+    ])
     simulated_dimensions = np.asarray((2, 3, 5, 10, 20, 35, 50))
     continuous_simulated = []
     for d in simulated_dimensions:
         result = simulate_continuous_exit(
             simulation_paths, int(d), np.random.default_rng(seed + 300 + int(d))
         )
-        continuous_simulated.append((result["rho"][0], result["pgf"][0]))
+        continuous_simulated.append((result["rho"][0], result["exit_by_two"][0]))
     continuous_simulated = np.asarray(continuous_simulated)
     figure, axes = plt.subplots(1, 2, figsize=(8.5, 3.5))
     for axis, column, ylabel in (
         (axes[0], 0, r"$\mathbb{E}[\rho]$"),
-        (axes[1], 1, r"$\mathbb{E}[\xi^\rho]$"),
+        (axes[1], 1, r"$\mathbb{P}(\rho\leq 2)$"),
     ):
         axis.plot(dimensions, continuous_exact[:, column], color=colors[0],
                   label="Exact")
@@ -717,8 +730,8 @@ def save_figures(
 
     # The full-functional sweep varies all active thresholds together.  The
     # pre-/post-exit differences isolate the terminal interval and reveal its
-    # selection bias; normalized active positions show which coordinates tend
-    # to be closest to their thresholds when the first exit occurs.
+    # selection bias; terminal active positions show which coordinates tend to
+    # be closest to their thresholds when the first exit occurs.
     reliability_thresholds = np.arange(1, 9)
     reliability_exact = []
     reliability_simulated = []
@@ -732,13 +745,13 @@ def save_figures(
             float(exact["rho"]),
             float(exact["tau_plus"] - exact["tau_minus"]),
             float(exact["cost_plus"] - exact["cost_minus"]),
-            *(float(exact[f"active_plus_{k}"]) / m for k in range(1, 4)),
+            *(float(exact[f"active_plus_{k}"]) for k in range(1, 4)),
         ))
         reliability_simulated.append((
             simulated["rho"][0],
             simulated["tau_plus"][0] - simulated["tau_minus"][0],
             simulated["cost_plus"][0] - simulated["cost_minus"][0],
-            *(simulated[f"active_plus_{k}"][0] / m for k in range(1, 4)),
+            *(simulated[f"active_plus_{k}"][0] for k in range(1, 4)),
         ))
     reliability_exact = np.asarray(reliability_exact)
     reliability_simulated = np.asarray(reliability_simulated)
@@ -755,7 +768,7 @@ def save_figures(
                   color=colors[0], label="Exact")
         axis.scatter(reliability_thresholds, reliability_simulated[:, column],
                      color="black", s=20, zorder=3, label="Monte Carlo")
-        axis.set(xlabel="Common threshold $m$", ylabel=ylabel)
+        axis.set(xlabel="Common threshold $M$", ylabel=ylabel)
     axes[0, 1].axhline(float(unconditional_time), color="#777777",
                        linestyle="--", label="Ordinary interval mean")
     axes[1, 0].axhline(float(unconditional_cost), color="#777777",
@@ -769,11 +782,11 @@ def save_figures(
             reliability_thresholds, reliability_simulated[:, 3 + coordinate],
             color=colors[coordinate], s=18, zorder=3,
         )
-    axes[1, 1].axhline(1.0, color="#777777", linestyle="--",
-                       label="threshold")
+    axes[1, 1].plot(reliability_thresholds, reliability_thresholds,
+                    color="#777777", linestyle="--", label="threshold")
     axes[1, 1].set(
-        xlabel="Common threshold $m$",
-        ylabel=r"$\mathbb{E}[A_i(\rho)]/m$",
+        xlabel="Common threshold $M$",
+        ylabel=r"$\mathbb{E}[A_i(\rho)]$",
     )
     axes[0, 0].legend(frameon=False)
     axes[0, 1].legend(frameon=False)
@@ -783,15 +796,15 @@ def save_figures(
     write_figure(figure, "reliability_threshold_sweep")
 
     print("\nPARAMETER-SWEEP ENDPOINTS")
-    print("weak-order epochs at m=1:", common_exact[0])
-    print("weak-order epochs at m=10:", common_exact[-1])
+    print("weak-order epochs at M=1:", common_exact[0])
+    print("weak-order epochs at M=10:", common_exact[-1])
     print("coordinate-1 rank at M1=1:", first_exact[0])
     print("coordinate-1 rank at M1=12:", first_exact[-1])
     print("continuous d=2:", continuous_exact[0])
     print("continuous d=50:", continuous_exact[-1])
-    print("reliability [rho, terminal time, terminal cost, normalized A_i]")
-    print("  m=1:", reliability_exact[0])
-    print("  m=8:", reliability_exact[-1])
+    print("reliability [rho, terminal time, terminal cost, E[A_i(rho)]]")
+    print("  M=1:", reliability_exact[0])
+    print("  M=8:", reliability_exact[-1])
 
 
 def main() -> None:

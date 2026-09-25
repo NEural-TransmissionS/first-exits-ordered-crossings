@@ -39,8 +39,8 @@ design of the 2022 paper. They show:
 
 1. how the number of distinct crossing epochs changes with a common threshold,
    and how delaying one coordinate changes its probability of crossing first;
-2. the dependence of two continuous-example functionals on dimension from
-   $d=2$ through $d=50$;
+2. the dependence of the mean exit index and the probability of exit by the
+   second observation on dimension from $d=2$ through $d=50$;
 3. how the exit index, terminal-interval duration and signed cost, and active
    positions change as the thresholds vary in the condition-monitoring example.
 
