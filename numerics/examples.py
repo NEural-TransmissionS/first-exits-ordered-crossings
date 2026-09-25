@@ -703,6 +703,7 @@ def save_figures(
     paper, with Monte Carlo points checking the exact threshold curves.
     """
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
 
     output_directory.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({"font.size": 10, "axes.spines.top": False,
@@ -917,17 +918,19 @@ def save_figures(
     # included in the tick labels for context.
     joint = baseline_profile["joint_cause_regime"]
     conditional = joint / joint.sum(axis=1, keepdims=True)
-    joint_image = axes[1, 0].imshow(
-        joint, cmap="magma", aspect="auto", vmin=0.0
+    light_joint_map = LinearSegmentedColormap.from_list(
+        "light_joint", ("#fffaf0", "#fee8b0", "#fdbb84", "#ef8a62")
     )
-    midpoint = 0.55 * float(joint.max())
+    joint_image = axes[1, 0].imshow(
+        joint, cmap=light_joint_map, aspect="auto", vmin=0.0
+    )
     for row in range(joint.shape[0]):
         for column in range(joint.shape[1]):
             axes[1, 0].text(
                 column, row,
                 f"{joint[row, column]:.3f}\n({100 * conditional[row, column]:.0f}%)",
                 ha="center", va="center", fontsize=9,
-                color="white" if joint[row, column] > midpoint else "black",
+                color="#202020",
             )
     prior_regime = np.asarray([float(regime[1]) for regime in REGIMES])
     axes[1, 0].set_xticks(
@@ -944,6 +947,10 @@ def save_figures(
         xlabel="Terminal regime", ylabel="Cause of exit",
         title="Joint probability (row-conditional percentage), $M=3$",
     )
+    axes[1, 0].set_xticks(np.arange(-0.5, 3, 1), minor=True)
+    axes[1, 0].set_yticks(np.arange(-0.5, 4, 1), minor=True)
+    axes[1, 0].grid(which="minor", color="white", linewidth=1.0)
+    axes[1, 0].tick_params(which="minor", bottom=False, left=False)
     figure.colorbar(joint_image, ax=axes[1, 0], shrink=0.84,
                     label="Joint probability")
 
