@@ -529,8 +529,8 @@ def exact_reliability_moments(
 def exact_reliability_profile(
     threshold: Index,
     tolerance: float = 1e-13,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return survival, cause-of-exit, and terminal-regime probabilities.
+) -> dict[str, np.ndarray]:
+    """Return survival and joint cause/regime exit probabilities.
 
     The finite-state recursion retains every sub-threshold active position.
     Absorbing transitions are classified by the coordinates crossing on that
@@ -554,8 +554,11 @@ def exact_reliability_profile(
     survival = [1.0]
     causes = np.zeros(4)       # coordinates 1, 2, 3 alone; then a tie
     terminal_regimes = np.zeros(3)
+    joint_cause_regime = np.zeros((4, 3))
+    cumulative_causes = [np.zeros(4)]
     for _ in range(10_000):
         next_states: dict[Index, float] = {}
+        causes_this_step = np.zeros(4)
         for position, state_mass in states.items():
             for regime_index, (regime_mass, increments) in enumerate(regime_laws):
                 for increment, conditional_mass in increments:
@@ -569,7 +572,9 @@ def exact_reliability_profile(
                     if crossed:
                         cause = crossed[0] if len(crossed) == 1 else 3
                         causes[cause] += mass
+                        causes_this_step[cause] += mass
                         terminal_regimes[regime_index] += mass
+                        joint_cause_regime[cause, regime_index] += mass
                     else:
                         next_states[new_position] = (
                             next_states.get(new_position, 0.0) + mass
@@ -577,11 +582,18 @@ def exact_reliability_profile(
         states = next_states
         remaining = sum(states.values())
         survival.append(remaining)
+        cumulative_causes.append(cumulative_causes[-1] + causes_this_step)
         if remaining < tolerance:
             break
     else:
         raise RuntimeError("reliability survival recursion did not converge")
-    return np.asarray(survival), causes, terminal_regimes
+    return {
+        "survival": np.asarray(survival),
+        "causes": causes,
+        "terminal_regimes": terminal_regimes,
+        "joint_cause_regime": joint_cause_regime,
+        "cumulative_causes": np.vstack(cumulative_causes),
+    }
 
 
 def simulate_reliability_samples(
@@ -806,8 +818,10 @@ def save_figures(
             threshold,
         ))
 
-    cause_exact = np.vstack([profile[1] for profile in reliability_profiles])
-    regime_exact = np.vstack([profile[2] for profile in reliability_profiles])
+    cause_exact = np.vstack([profile["causes"] for profile in reliability_profiles])
+    regime_exact = np.vstack([
+        profile["terminal_regimes"] for profile in reliability_profiles
+    ])
     cause_simulated = np.zeros_like(cause_exact)
     regime_simulated = np.zeros_like(regime_exact)
     cost_quantiles = np.empty((len(reliability_thresholds), 5))
@@ -836,7 +850,7 @@ def save_figures(
     # Survival through successive inspection epochs.
     for threshold_value in (2, 4, 6):
         row = threshold_value - 1
-        survival = reliability_profiles[row][0]
+        survival = reliability_profiles[row]["survival"]
         epochs = np.arange(len(survival))
         axes[0, 0].step(
             epochs, survival, where="post", color=reliability_colors[row // 2],
@@ -919,6 +933,132 @@ def save_figures(
     axes[1, 1].legend(frameon=False)
     figure.tight_layout()
     write_figure(figure, "reliability_diagnostics")
+
+    # Comparison sheet for selecting the most informative cause/regime panels.
+    baseline_row = 2                         # common threshold M=3
+    baseline_profile = reliability_profiles[baseline_row]
+    baseline_samples = reliability_samples[baseline_row]
+    baseline_crossed = np.column_stack([
+        baseline_samples[f"active_plus_{k}"] > 3 for k in range(1, 4)
+    ])
+    baseline_count = baseline_crossed.sum(axis=1)
+    simulated_cause = np.full(simulation_paths, 3, dtype=np.int8)
+    for coordinate in range(3):
+        simulated_cause[
+            baseline_crossed[:, coordinate] & (baseline_count == 1)
+        ] = coordinate
+
+    figure, axes = plt.subplots(2, 3, figsize=(12.2, 7.0))
+
+    # Alternative A: cause probabilities as the common threshold varies.
+    for column, (label, color) in enumerate(zip(cause_labels, reliability_colors)):
+        axes[0, 0].plot(
+            reliability_thresholds, cause_exact[:, column], color=color, label=label
+        )
+        axes[0, 0].scatter(
+            reliability_thresholds, cause_simulated[:, column],
+            color=color, s=12, zorder=3,
+        )
+    axes[0, 0].set(
+        title="Cause versus threshold", xlabel="Common threshold $M$",
+        ylabel="Probability", ylim=(-0.02, 1.02),
+    )
+    axes[0, 0].legend(frameon=False, ncol=2, fontsize=8)
+
+    # Alternative B: standard cause-specific cumulative incidence.
+    cumulative_exact = baseline_profile["cumulative_causes"]
+    cumulative_epochs = np.arange(len(cumulative_exact))
+    marker_epochs = np.arange(0, min(len(cumulative_exact), 61), 4)
+    for cause, (label, color) in enumerate(zip(cause_labels, reliability_colors)):
+        axes[0, 1].step(
+            cumulative_epochs, cumulative_exact[:, cause], where="post",
+            color=color, label=label,
+        )
+        cumulative_simulated = np.asarray([
+            np.mean((baseline_samples["rho"] <= epoch)
+                    & (simulated_cause == cause))
+            for epoch in marker_epochs
+        ])
+        axes[0, 1].scatter(
+            marker_epochs, cumulative_simulated, color=color, s=12, zorder=3
+        )
+    axes[0, 1].set(
+        title="Cause-specific cumulative incidence ($M=3$)",
+        xlabel="Inspection epoch $n$", ylabel=r"$\mathbb{P}(\rho\leq n,J=j)$",
+        xlim=(0, 60), ylim=(-0.02, 0.55),
+    )
+
+    # Alternative C: terminal-regime curves over the threshold.
+    for column, (regime, color) in enumerate(zip(REGIMES, reliability_colors)):
+        axes[0, 2].plot(
+            reliability_thresholds, regime_exact[:, column],
+            color=color, label=regime[0],
+        )
+        axes[0, 2].scatter(
+            reliability_thresholds, regime_simulated[:, column],
+            color=color, s=12, zorder=3,
+        )
+        axes[0, 2].axhline(
+            float(regime[1]), color=color, linestyle=":", linewidth=1.0
+        )
+    axes[0, 2].set(
+        title="Terminal regime versus threshold",
+        xlabel="Common threshold $M$", ylabel="Probability", ylim=(-0.02, 1.02),
+    )
+    axes[0, 2].legend(frameon=False, fontsize=8)
+
+    # Alternative D: a direct prior-versus-terminal comparison.
+    regime_positions = np.arange(3)
+    bar_width = 0.36
+    prior_regime = np.asarray([float(regime[1]) for regime in REGIMES])
+    axes[1, 0].bar(
+        regime_positions - bar_width / 2, prior_regime, bar_width,
+        color="#BBBBBB", label="Prior",
+    )
+    axes[1, 0].bar(
+        regime_positions + bar_width / 2,
+        baseline_profile["terminal_regimes"], bar_width,
+        color=colors[0], label="At exit",
+    )
+    axes[1, 0].set_xticks(
+        regime_positions, [regime[0] for regime in REGIMES]
+    )
+    axes[1, 0].set(
+        title="Prior versus terminal regime ($M=3$)", ylabel="Probability",
+        ylim=(0.0, 0.65),
+    )
+    axes[1, 0].legend(frameon=False)
+
+    def annotated_heatmap(axis: object, values: np.ndarray, title: str,
+                          color_map: str = "magma") -> None:
+        """Draw a small probability heat map with numerical cell labels."""
+        image = axis.imshow(values, cmap=color_map, aspect="auto", vmin=0.0)
+        midpoint = 0.55 * float(values.max())
+        for row in range(values.shape[0]):
+            for column in range(values.shape[1]):
+                axis.text(
+                    column, row, f"{values[row, column]:.3f}",
+                    ha="center", va="center", fontsize=8,
+                    color="white" if values[row, column] > midpoint else "black",
+                )
+        axis.set_xticks(np.arange(3), [regime[0] for regime in REGIMES])
+        axis.set_yticks(np.arange(4), cause_labels)
+        axis.set(title=title, xlabel="Terminal regime", ylabel="Cause of exit")
+        figure.colorbar(image, ax=axis, shrink=0.82)
+
+    joint = baseline_profile["joint_cause_regime"]
+    annotated_heatmap(
+        axes[1, 1], joint,
+        r"Joint $\mathbb{P}(J=j,R=r)$ ($M=3$)",
+    )
+    conditional = joint / joint.sum(axis=1, keepdims=True)
+    annotated_heatmap(
+        axes[1, 2], conditional,
+        r"Conditional $\mathbb{P}(R=r\mid J=j)$ ($M=3$)",
+        color_map="viridis",
+    )
+    figure.tight_layout()
+    write_figure(figure, "reliability_panel_alternatives")
 
     print("\nPARAMETER-SWEEP ENDPOINTS")
     print("weak-order landscape ranges:",

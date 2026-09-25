@@ -44,6 +44,9 @@ Monte Carlo points check the condition-monitoring example. They show:
 3. system survival, competing causes of exit, terminal-regime selection, and
    passive-cost risk in the condition-monitoring example.
 
+The script also writes a reliability-panel comparison sheet containing both
+marginal and joint cause--regime views for selecting the final manuscript plot.
+
 Each plotted Monte Carlo point uses 10,000 paths by default. Change this
 independently of the numerical tables with, for example,
 
