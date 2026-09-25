@@ -715,9 +715,10 @@ def save_figures(
     figure.tight_layout()
     write_figure(figure, "continuous_dimension_sweep")
 
-    # The full-functional sweep varies all active thresholds together.  It
-    # displays an exit-index moment, an observation-time moment, and the signed
-    # passive cost, hence exercising distinct pieces of the master transform.
+    # The full-functional sweep varies all active thresholds together.  The
+    # pre-/post-exit differences isolate the terminal interval and reveal its
+    # selection bias; normalized active positions show which coordinates tend
+    # to be closest to their thresholds when the first exit occurs.
     reliability_thresholds = np.arange(1, 9)
     reliability_exact = []
     reliability_simulated = []
@@ -727,24 +728,57 @@ def save_figures(
         simulated = simulate_reliability(
             simulation_paths, np.random.default_rng(seed + 400 + int(m)), threshold
         )
-        reliability_exact.append(tuple(float(exact[name])
-                                       for name in ("rho", "tau_plus", "cost_plus")))
-        reliability_simulated.append(tuple(simulated[name][0]
-                                           for name in ("rho", "tau_plus", "cost_plus")))
+        reliability_exact.append((
+            float(exact["rho"]),
+            float(exact["tau_plus"] - exact["tau_minus"]),
+            float(exact["cost_plus"] - exact["cost_minus"]),
+            *(float(exact[f"active_plus_{k}"]) / m for k in range(1, 4)),
+        ))
+        reliability_simulated.append((
+            simulated["rho"][0],
+            simulated["tau_plus"][0] - simulated["tau_minus"][0],
+            simulated["cost_plus"][0] - simulated["cost_minus"][0],
+            *(simulated[f"active_plus_{k}"][0] / m for k in range(1, 4)),
+        ))
     reliability_exact = np.asarray(reliability_exact)
     reliability_simulated = np.asarray(reliability_simulated)
-    figure, axes = plt.subplots(1, 3, figsize=(10.2, 3.3))
+    _, _, _, unconditional_time, unconditional_cost = (
+        reliability_increment_polynomials()
+    )
+    figure, axes = plt.subplots(2, 2, figsize=(8.7, 6.5))
     for axis, column, ylabel in (
-        (axes[0], 0, r"$\mathbb{E}[\rho]$"),
-        (axes[1], 1, r"$\mathbb{E}[\tau_\rho]$"),
-        (axes[2], 2, r"$\mathbb{E}[P(\rho)]$"),
+        (axes[0, 0], 0, r"$\mathbb{E}[\rho]$"),
+        (axes[0, 1], 1, r"$\mathbb{E}[\tau_\rho-\tau_{\rho-1}]$"),
+        (axes[1, 0], 2, r"$\mathbb{E}[P_\rho-P_{\rho-1}]$"),
     ):
         axis.plot(reliability_thresholds, reliability_exact[:, column],
                   color=colors[0], label="Exact")
         axis.scatter(reliability_thresholds, reliability_simulated[:, column],
                      color="black", s=20, zorder=3, label="Monte Carlo")
         axis.set(xlabel="Common threshold $m$", ylabel=ylabel)
-    axes[0].legend(frameon=False)
+    axes[0, 1].axhline(float(unconditional_time), color="#777777",
+                       linestyle="--", label="Ordinary interval mean")
+    axes[1, 0].axhline(float(unconditional_cost), color="#777777",
+                       linestyle="--", label="Ordinary interval mean")
+    for coordinate in range(3):
+        axes[1, 1].plot(
+            reliability_thresholds, reliability_exact[:, 3 + coordinate],
+            color=colors[coordinate], label=rf"coordinate ${coordinate + 1}$",
+        )
+        axes[1, 1].scatter(
+            reliability_thresholds, reliability_simulated[:, 3 + coordinate],
+            color=colors[coordinate], s=18, zorder=3,
+        )
+    axes[1, 1].axhline(1.0, color="#777777", linestyle="--",
+                       label="threshold")
+    axes[1, 1].set(
+        xlabel="Common threshold $m$",
+        ylabel=r"$\mathbb{E}[A_i(\rho)]/m$",
+    )
+    axes[0, 0].legend(frameon=False)
+    axes[0, 1].legend(frameon=False)
+    axes[1, 0].legend(frameon=False)
+    axes[1, 1].legend(frameon=False, ncol=2)
     figure.tight_layout()
     write_figure(figure, "reliability_threshold_sweep")
 
@@ -755,8 +789,9 @@ def save_figures(
     print("coordinate-1 rank at M1=12:", first_exact[-1])
     print("continuous d=2:", continuous_exact[0])
     print("continuous d=50:", continuous_exact[-1])
-    print("reliability m=1:", reliability_exact[0])
-    print("reliability m=8:", reliability_exact[-1])
+    print("reliability [rho, terminal time, terminal cost, normalized A_i]")
+    print("  m=1:", reliability_exact[0])
+    print("  m=8:", reliability_exact[-1])
 
 
 def main() -> None:

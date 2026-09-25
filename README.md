@@ -41,8 +41,8 @@ design of the 2022 paper. They show:
    and how delaying one coordinate changes its probability of crossing first;
 2. the dependence of two continuous-example functionals on dimension from
    $d=2$ through $d=50$;
-3. how the exit index, exit time, and signed passive cost change as the active
-   thresholds vary in the condition-monitoring example.
+3. how the exit index, terminal-interval duration and signed cost, and active
+   positions change as the thresholds vary in the condition-monitoring example.
 
 Each plotted Monte Carlo point uses 10,000 paths by default. Change this
 independently of the numerical tables with, for example,
