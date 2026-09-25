@@ -844,8 +844,22 @@ def save_figures(
             samples["cost_plus"], (0.05, 0.25, 0.50, 0.75, 0.95)
         )
 
-    figure, axes = plt.subplots(2, 2, figsize=(8.7, 6.5))
     reliability_colors = ("#4C78A8", "#E45756", "#54A24B", "#B279A2")
+    cause_labels = ("coordinate 1", "coordinate 2", "coordinate 3", "tie")
+    baseline_row = 2                         # common threshold M=3
+    baseline_profile = reliability_profiles[baseline_row]
+    baseline_samples = reliability_samples[baseline_row]
+    baseline_crossed = np.column_stack([
+        baseline_samples[f"active_plus_{k}"] > 3 for k in range(1, 4)
+    ])
+    baseline_count = baseline_crossed.sum(axis=1)
+    simulated_cause = np.full(simulation_paths, 3, dtype=np.int8)
+    for coordinate in range(3):
+        simulated_cause[
+            baseline_crossed[:, coordinate] & (baseline_count == 1)
+        ] = coordinate
+
+    figure, axes = plt.subplots(2, 2, figsize=(10.0, 7.4))
 
     # Survival through successive inspection epochs.
     for threshold_value in (2, 4, 6):
@@ -873,43 +887,65 @@ def save_figures(
     axes[0, 0].set_ylim(-0.02, 1.02)
     axes[0, 0].legend(frameon=False)
 
-    # Competing causes: exactly one coordinate triggers, or several tie.
-    cause_labels = ("coordinate 1", "coordinate 2", "coordinate 3", "tie")
-    for column, (label, color) in enumerate(zip(cause_labels, reliability_colors)):
-        axes[0, 1].plot(
-            reliability_thresholds, cause_exact[:, column], color=color, label=label
+    # Cause-specific cumulative incidence combines failure timing and cause.
+    cumulative_exact = baseline_profile["cumulative_causes"]
+    cumulative_epochs = np.arange(len(cumulative_exact))
+    marker_epochs = np.arange(0, min(len(cumulative_exact), 61), 4)
+    for cause, (label, color) in enumerate(zip(cause_labels, reliability_colors)):
+        axes[0, 1].step(
+            cumulative_epochs, cumulative_exact[:, cause], where="post",
+            color=color, label=label,
         )
+        cumulative_simulated = np.asarray([
+            np.mean((baseline_samples["rho"] <= epoch)
+                    & (simulated_cause == cause))
+            for epoch in marker_epochs
+        ])
         axes[0, 1].scatter(
-            reliability_thresholds, cause_simulated[:, column],
-            color=color, s=15, zorder=3,
+            marker_epochs, cumulative_simulated, color=color, s=12, zorder=3
         )
     axes[0, 1].set(
-        xlabel="Common threshold $M$", ylabel="Probability",
-        title="Cause of first exit",
+        xlabel="Inspection epoch $n$", ylabel=r"$\mathbb{P}(\rho\leq n,J=j)$",
+        title="Cause-specific cumulative incidence ($M=3$)",
     )
-    axes[0, 1].set_ylim(-0.02, 1.02)
+    axes[0, 1].set_xlim(0, 60)
+    axes[0, 1].set_ylim(-0.02, 0.55)
     axes[0, 1].legend(frameon=False, ncol=2)
 
-    # The regime at exit differs from the prior regime mixture because damaging
-    # regimes are disproportionately represented at a stopping epoch.
-    for column, (regime, color) in enumerate(zip(REGIMES, reliability_colors)):
-        label = regime[0]
-        axes[1, 0].plot(
-            reliability_thresholds, regime_exact[:, column], color=color, label=label
-        )
-        axes[1, 0].scatter(
-            reliability_thresholds, regime_simulated[:, column],
-            color=color, s=15, zorder=3,
-        )
-        axes[1, 0].axhline(
-            float(regime[1]), color=color, linestyle=":", linewidth=1.0
-        )
-    axes[1, 0].set(
-        xlabel="Common threshold $M$", ylabel="Probability",
-        title="Terminal regime (dotted: prior)",
+    # A single enlarged heat map carries the joint probabilities and their row
+    # conditionals.  Marginal cause probabilities and prior regime weights are
+    # included in the tick labels for context.
+    joint = baseline_profile["joint_cause_regime"]
+    conditional = joint / joint.sum(axis=1, keepdims=True)
+    joint_image = axes[1, 0].imshow(
+        joint, cmap="magma", aspect="auto", vmin=0.0
     )
-    axes[1, 0].set_ylim(-0.02, 1.02)
-    axes[1, 0].legend(frameon=False)
+    midpoint = 0.55 * float(joint.max())
+    for row in range(joint.shape[0]):
+        for column in range(joint.shape[1]):
+            axes[1, 0].text(
+                column, row,
+                f"{joint[row, column]:.3f}\n({100 * conditional[row, column]:.0f}%)",
+                ha="center", va="center", fontsize=9,
+                color="white" if joint[row, column] > midpoint else "black",
+            )
+    prior_regime = np.asarray([float(regime[1]) for regime in REGIMES])
+    axes[1, 0].set_xticks(
+        np.arange(3),
+        [f"{regime[0]}\nprior {prior_regime[k]:.2f}"
+         for k, regime in enumerate(REGIMES)],
+    )
+    axes[1, 0].set_yticks(
+        np.arange(4),
+        [f"{label}\n{baseline_profile['causes'][k]:.3f}"
+         for k, label in enumerate(cause_labels)],
+    )
+    axes[1, 0].set(
+        xlabel="Terminal regime", ylabel="Cause of exit",
+        title="Joint probability (row-conditional percentage), $M=3$",
+    )
+    figure.colorbar(joint_image, ax=axes[1, 0], shrink=0.84,
+                    label="Joint probability")
 
     # The signed passive component is nonmonotone pathwise, so its distribution
     # is more revealing than its Wald-governed mean.
@@ -935,19 +971,6 @@ def save_figures(
     write_figure(figure, "reliability_diagnostics")
 
     # Comparison sheet for selecting the most informative cause/regime panels.
-    baseline_row = 2                         # common threshold M=3
-    baseline_profile = reliability_profiles[baseline_row]
-    baseline_samples = reliability_samples[baseline_row]
-    baseline_crossed = np.column_stack([
-        baseline_samples[f"active_plus_{k}"] > 3 for k in range(1, 4)
-    ])
-    baseline_count = baseline_crossed.sum(axis=1)
-    simulated_cause = np.full(simulation_paths, 3, dtype=np.int8)
-    for coordinate in range(3):
-        simulated_cause[
-            baseline_crossed[:, coordinate] & (baseline_count == 1)
-        ] = coordinate
-
     figure, axes = plt.subplots(2, 3, figsize=(12.2, 7.0))
 
     # Alternative A: cause probabilities as the common threshold varies.
@@ -966,9 +989,6 @@ def save_figures(
     axes[0, 0].legend(frameon=False, ncol=2, fontsize=8)
 
     # Alternative B: standard cause-specific cumulative incidence.
-    cumulative_exact = baseline_profile["cumulative_causes"]
-    cumulative_epochs = np.arange(len(cumulative_exact))
-    marker_epochs = np.arange(0, min(len(cumulative_exact), 61), 4)
     for cause, (label, color) in enumerate(zip(cause_labels, reliability_colors)):
         axes[0, 1].step(
             cumulative_epochs, cumulative_exact[:, cause], where="post",
@@ -1010,7 +1030,6 @@ def save_figures(
     # Alternative D: a direct prior-versus-terminal comparison.
     regime_positions = np.arange(3)
     bar_width = 0.36
-    prior_regime = np.asarray([float(regime[1]) for regime in REGIMES])
     axes[1, 0].bar(
         regime_positions - bar_width / 2, prior_regime, bar_width,
         color="#BBBBBB", label="Prior",
